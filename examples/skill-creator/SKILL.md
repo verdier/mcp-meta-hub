@@ -16,8 +16,8 @@ A skill = a SKILL.md file that tells the AI agent **which tools to use** and **w
 This is the primary use case for `list_tools` — discovering what's available to build a skill from:
 
 ```
-call_tool("list_tools", {})                     → see all servers and tools
-call_tool("list_tools", { "prefix": "github" }) → see github tools with full schemas
+list_tools({})                     → see all servers and tools
+list_tools({ "prefix": "github" }) → see github tools with full schemas
 ```
 
 Read the tool names, descriptions, and input schemas carefully. Pick the ones relevant to the skill you're building.

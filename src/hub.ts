@@ -15,6 +15,7 @@ export class Hub {
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
       const serverName = entries[i][0];
+      const serverConfig = entries[i][1];
       if (result.status === "rejected") {
         console.error(`[mcp-meta-hub] Failed to connect to "${serverName}": ${result.reason}`);
         continue;
@@ -22,7 +23,8 @@ export class Hub {
       const server = result.value;
       this.servers.push(server);
       try {
-        await this.discoverTools(server);
+        const prefixFn = this.buildPrefixFn(serverName, serverConfig.prefix);
+        await this.discoverTools(server, prefixFn);
       } catch (err) {
         console.error(`[mcp-meta-hub] Failed to discover tools for "${serverName}": ${err}`);
       }
@@ -31,10 +33,17 @@ export class Hub {
     console.error(`[mcp-meta-hub] Ready — ${this.catalog.size} tools from ${this.servers.length} server(s)`);
   }
 
-  private async discoverTools(server: ConnectedServer): Promise<void> {
+  private buildPrefixFn(serverName: string, prefix?: boolean | string): (toolName: string) => string {
+    if (prefix === false) return (t) => t;
+    if (typeof prefix === "string") return (t) => `${prefix}${t}`;
+    // default (true/undefined): server__tool
+    return (t) => `${serverName}__${t}`;
+  }
+
+  private async discoverTools(server: ConnectedServer, prefixFn: (toolName: string) => string): Promise<void> {
     const { tools } = await server.client.listTools();
     for (const tool of tools) {
-      const qualifiedName = `${server.name}__${tool.name}`;
+      const qualifiedName = prefixFn(tool.name);
       this.catalog.set(qualifiedName, {
         qualifiedName,
         originalName: tool.name,

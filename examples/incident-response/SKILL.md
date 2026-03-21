@@ -16,6 +16,7 @@ Workflow for handling production incidents using GitHub, Sentry, and PagerDuty.
 | `github__search_commits` | Search recent commits. Params: `query`, `since`. |
 | `github__create_issue` | Create tracking issue. Params: `repo`, `title`, `labels`. |
 | `pagerduty__get_on_call` | Get current on-call engineer. |
+| `sentry__update_issue` | Update issue status. Params: `issueId`, `status` (resolved/unresolved). |
 
 ## Workflow
 

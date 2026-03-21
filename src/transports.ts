@@ -18,14 +18,38 @@ function isSseConfig(config: ServerConfig): config is { url: string; transport: 
   return "url" in config && "transport" in config && (config as { transport?: string }).transport === "sse";
 }
 
+/**
+ * Resolve $VAR references in env values from process.env.
+ * e.g. { "DB_PASS": "$MY_SECRET" } → { "DB_PASS": "actual-value" }
+ */
+export function resolveEnvRefs(env: Record<string, string>): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value.startsWith("$") && value.length > 1) {
+      const envKey = value.slice(1);
+      const envValue = process.env[envKey];
+      if (envValue !== undefined) {
+        resolved[key] = envValue;
+      } else {
+        console.error(`[mcp-meta-hub] Warning: env var "${envKey}" not found for "${key}", keeping literal "${value}"`);
+        resolved[key] = value;
+      }
+    } else {
+      resolved[key] = value;
+    }
+  }
+  return resolved;
+}
+
 export async function connectServer(name: string, config: ServerConfig): Promise<ConnectedServer> {
   const client = new Client({ name: `mcp-meta-hub/${name}`, version: "0.1.7" });
 
   if (isStdioConfig(config)) {
+    const env = config.env ? resolveEnvRefs(config.env) : {};
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
-      env: { ...process.env, ...config.env } as Record<string, string>,
+      env: { ...process.env, ...env } as Record<string, string>,
     });
     await client.connect(transport);
     return {

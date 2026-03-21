@@ -5,7 +5,7 @@ import type { Hub } from "./hub.js";
 export function createMcpServer(hub: Hub): McpServer {
   const server = new McpServer({
     name: "mcp-meta-hub",
-    version: "0.1.7",
+    version: "0.1.11",
   });
 
   server.tool(

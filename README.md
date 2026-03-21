@@ -29,7 +29,7 @@ AI Agent (Claude, Cursor, Copilot…)
     │  connects to N servers
     ▼
   ┌─────────┬──────────┬───────────┐
-  │ weather │ database │ github    │  ← MCP servers ("skills")
+  │ weather │ database │ github    │  ← MCP servers
   │ 3 tools │ 8 tools  │ 25 tools  │
   └─────────┴──────────┴───────────┘
 ```
@@ -180,7 +180,20 @@ A **skill** is a SKILL.md file that tells the AI agent what tools are available 
 
 Think of it like SQL views: same underlying tables, different perspectives for different purposes.
 
-There are two types:
+### The Skill Creator Pattern
+
+The `skill-creator` is a special meta-skill: it's the **only skill that uses `list_tools`**. All other skills go straight to `call_tool`.
+
+The workflow:
+1. Agent receives "create a skill for X"
+2. Skill-creator SKILL.md is activated
+3. Agent calls `list_tools` to discover available tools and schemas
+4. Agent writes a new SKILL.md with the right tools, params, and workflows
+5. From now on, the new skill **never calls `list_tools`** — it goes direct
+
+This is why mcp-meta-hub ships with a [`skill-creator` example](./examples/skill-creator/SKILL.md) — it's the bootstrap skill that creates all others.
+
+There are two types of skills:
 
 ### Type 1: Documentation Skills (99% of cases)
 
@@ -191,7 +204,7 @@ skills/devops/
 └── SKILL.md       ← That's it. Zero code.
 ```
 
-**Example:** You connect 3 existing MCP servers (GitHub, Sentry, PagerDuty) and write one skill that teaches the agent your incident response workflow:
+**Example:** Connect 3 existing MCP servers (GitHub, Sentry, PagerDuty) and let the [skill-creator](./examples/skill-creator/SKILL.md) build the skill that matches your exact workflow:
 
 ```markdown
 ---
@@ -230,41 +243,14 @@ This is the power: **your expertise becomes a reusable skill file.**
 
 ### Type 2: Custom MCP Servers (when no existing server fits)
 
-When you need to wrap a CLI, an internal API, or build something custom, you create an MCP server:
+When you need to wrap a CLI, an internal API, or build something custom, create an MCP server and register it in `mcp-hub.json`:
 
 ```
 skills/weather/
 ├── SKILL.md          ← Describes the skill for the AI agent
-├── src/
-│   └── index.ts      ← MCP server implementation
-├── package.json
-└── tsconfig.json
+├── src/index.ts      ← MCP server (use @modelcontextprotocol/sdk)
+└── package.json
 ```
-
-```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-
-const server = new McpServer({ name: "weather", version: "1.0.0" });
-
-server.tool(
-  "get_forecast",
-  "Get weather forecast for a city",
-  { city: z.string().describe("City name") },
-  async ({ city }) => ({
-    content: [{
-      type: "text",
-      text: JSON.stringify({ city, temperature_celsius: 22, condition: "sunny", humidity_percent: 55 }),
-    }],
-  }),
-);
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
-```
-
-Register it in `mcp-hub.json` alongside your other servers:
 
 ```json
 {
@@ -277,44 +263,7 @@ Register it in `mcp-hub.json` alongside your other servers:
 }
 ```
 
-See [`examples/weather/`](./examples/weather/) for a complete working example.
-
-### SKILL.md Format
-
-Every skill has a SKILL.md with YAML frontmatter:
-
-```markdown
----
-name: my-skill
-description: What it does + when to use it. This is how the agent finds your skill.
----
-
-# Skill Name
-
-[Context, domain knowledge, workflows]
-
-## Key Tools
-
-| Tool | Description |
-|---|---|
-| `prefix__tool_name` | What it does. Params: `param1` (type), `param2` (type). |
-
-## Examples
-
-[Calling patterns, common workflows, edge cases]
-```
-
-**The `description` is the most important line.** It's what the LLM matches against the user's request:
-
-```yaml
-# ✅ Good — specific, includes trigger conditions
-description: Manage property rentals (tenants, leases, payments). Use when the user asks about tenants, rent, or properties.
-
-# ❌ Bad — vague, no trigger
-description: Property management utilities.
-```
-
-**Skills list tools directly** — the agent should know which tools to call without introspection. `list_tools` is for advanced use and discovery, not a prerequisite.
+See [`examples/weather/`](./examples/weather/) for a complete working example with SKILL.md + MCP server code.
 
 ### Multi-Instance Skills
 
@@ -339,7 +288,62 @@ The same MCP server can run multiple times with different configs — useful for
 
 Tools become `accounting-company-a__get_balance` and `accounting-company-b__get_balance` — same skill, isolated contexts.
 
-See [`examples/weather/`](./examples/weather/) for a complete working skill with SKILL.md.
+## Advanced Configuration
+
+### Environment Variable References
+
+Use `$VAR` in server env values to reference variables from the parent process environment. Useful for multi-instance setups where the same server needs different credentials:
+
+```json
+{
+  "servers": {
+    "accounting-a": {
+      "command": "node",
+      "args": ["./accounting-server.js"],
+      "env": { "DB_PASSWORD": "$ACCT_A_PASSWORD" }
+    },
+    "accounting-b": {
+      "command": "node",
+      "args": ["./accounting-server.js"],
+      "env": { "DB_PASSWORD": "$ACCT_B_PASSWORD" }
+    }
+  }
+}
+```
+
+The hub resolves `$ACCT_A_PASSWORD` from `process.env` at startup. If a referenced variable is not found, a warning is logged and the literal `$VAR` string is kept. Servers also inherit all parent environment variables automatically (unlike the MCP SDK default which only inherits `HOME`, `PATH`, etc.).
+
+### Tool Prefix
+
+By default, tools are namespaced as `{server}__{tool}` to prevent collisions. You can override this **per server**:
+
+```json
+{
+  "servers": {
+    "weather": {
+      "command": "node",
+      "args": ["./weather.js"],
+      "prefix": true
+    },
+    "brave": {
+      "command": "npx",
+      "args": ["brave-search"],
+      "prefix": false
+    },
+    "internal": {
+      "command": "node",
+      "args": ["./internal.js"],
+      "prefix": "myapp__"
+    }
+  }
+}
+```
+
+| Value | Example tool name | Use case |
+|-------|-------------------|----------|
+| `true` (default) | `weather__get_forecast` | Multiple servers, prevent collisions |
+| `false` | `get_forecast` | Server already prefixes its own tool names |
+| `"myapp__"` | `myapp__get_forecast` | Custom prefix for branding/grouping |
 
 ## Why Not Just Use Bash?
 
@@ -348,7 +352,7 @@ The current trend is giving AI agents shell access. It's powerful but dangerous:
 | | Bash | mcp-meta-hub |
 |---|------|---------|
 | **Scope** | Unlimited system access | Only defined tools |
-| **Safety** | `rm -rf /` is one hallucination away | Agent can only call registered skills |
+| **Safety** | `rm -rf /` is one hallucination away | Agent can only call registered tools |
 | **Auditability** | Arbitrary commands | Structured tool calls |
 | **Reliability** | Depends on shell parsing | Typed schemas with validation |
 

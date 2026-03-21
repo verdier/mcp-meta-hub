@@ -1,6 +1,6 @@
 {
   "name": "mcp-meta-hub",
-  "version": "0.1.7",
+  "version": "0.1.11",
   "description": "A lightweight MCP proxy that aggregates multiple MCP servers into two meta-tools: list_tools and call_tool. Stop giving your AI agent a shell — give it skills.",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "dev": "tsup --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsup src/index.ts src/e2e.test.ts src/config.test.ts src/resilience.test.ts --format esm --clean --sourcemap --target node20 --no-dts && node dist/config.test.js && node dist/e2e.test.js && node dist/resilience.test.js",
+    "test": "tsup src/index.ts src/e2e.test.ts src/config.test.ts src/resilience.test.ts src/features.test.ts --format esm --clean --sourcemap --target node20 --no-dts && node dist/config.test.js && node dist/features.test.js && node dist/e2e.test.js && node dist/resilience.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

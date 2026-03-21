@@ -85,6 +85,36 @@ async function run() {
     assert.ok(!result.success);
   });
 
+  // ── prefix per-server option ────────────────────────────────────────
+
+  await test("accepts prefix: true on a server", () => {
+    const result = ConfigSchema.safeParse({
+      servers: { weather: { command: "node", args: [], prefix: true } },
+    });
+    assert.ok(result.success);
+  });
+
+  await test("accepts prefix: false on a server", () => {
+    const result = ConfigSchema.safeParse({
+      servers: { weather: { command: "node", args: [], prefix: false } },
+    });
+    assert.ok(result.success);
+  });
+
+  await test("accepts prefix: custom string on a server", () => {
+    const result = ConfigSchema.safeParse({
+      servers: { weather: { command: "node", args: [], prefix: "wx__" } },
+    });
+    assert.ok(result.success);
+  });
+
+  await test("prefix defaults to undefined when omitted", () => {
+    const result = ConfigSchema.safeParse({
+      servers: { weather: { command: "node", args: [] } },
+    });
+    assert.ok(result.success);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }

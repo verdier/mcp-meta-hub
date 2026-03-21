@@ -6,18 +6,21 @@ const StdioServerSchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional().default([]),
   env: z.record(z.string()).optional(),
+  prefix: z.union([z.boolean(), z.string()]).optional(),
 });
 
 const SseServerSchema = z.object({
   url: z.string().url(),
   transport: z.literal("sse"),
   headers: z.record(z.string()).optional(),
+  prefix: z.union([z.boolean(), z.string()]).optional(),
 });
 
 const StreamableHttpServerSchema = z.object({
   url: z.string().url(),
   transport: z.literal("streamable-http").optional(),
   headers: z.record(z.string()).optional(),
+  prefix: z.union([z.boolean(), z.string()]).optional(),
 });
 
 export const ServerConfigSchema = z.discriminatedUnion("transport", [
