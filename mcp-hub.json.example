@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "weather": {
+      "command": "node",
+      "args": ["examples/weather/dist/index.js"]
+    }
+  }
+}
