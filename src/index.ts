@@ -21,13 +21,19 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
+  let stopping = false;
   const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
     await hub.stop();
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  // When the parent process dies without sending a signal (e.g. npm exec killed),
+  // stdin receives EOF — use this as a reliable shutdown trigger.
+  process.stdin.on("close", () => void shutdown());
 }
 
 main().catch((error) => {

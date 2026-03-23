@@ -1,6 +1,6 @@
 {
   "name": "mcp-meta-hub",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "A lightweight MCP proxy that aggregates multiple MCP servers into two meta-tools: list_tools and call_tool. Stop giving your AI agent a shell — give it skills.",
   "type": "module",
   "bin": {
