@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import { ConfigSchema, loadConfig } from "./config.js";
-import { AuthorizationBroker } from "./oauth/broker.js";
+import { AuthorizationBroker, FlowRefusedError } from "./oauth/broker.js";
 import { createNetworkPolicy, isPublicAddress } from "./oauth/network.js";
+import { OAuthChild } from "./oauth/child.js";
 import { HubOAuthProvider } from "./oauth/provider.js";
 import { CredentialStore, STORE_FILE } from "./oauth/store.js";
 import { createRunner } from "./test-runner.js";
@@ -163,40 +164,52 @@ async function run() {
 
   // --- broker ---
 
-  await test("broker: a state is honoured once", () => {
+  const flow = (broker: AuthorizationBroker, key: string, verifier = `verifier-${key}`) => {
+    const state = broker.issueState(key);
+    broker.setVerifier(key, state, verifier);
+    return state;
+  };
+  const refusal = (reason: "superseded" | "invalid") => (e: unknown) => e instanceof FlowRefusedError && e.reason === reason;
+
+  await test("broker: a state is honoured once, with the verifier of its own flow", () => {
     const broker = new AuthorizationBroker();
-    const state = broker.issueState("a");
-    assert.strictEqual(broker.consume(state), "a");
-    assert.strictEqual(broker.consume(state), undefined);
+    const state = flow(broker, "a");
+    assert.strictEqual(broker.serverOf(state), "a");
+    assert.deepStrictEqual(broker.consume(state), { key: "a", verifier: "verifier-a" });
+    assert.strictEqual(broker.serverOf(state), undefined);
+    assert.throws(() => broker.consume(state), refusal("invalid"));
   });
 
   await test("broker: an expired state is refused (and consumed)", () => {
     let now = 1_000;
     const broker = new AuthorizationBroker(() => now);
-    const state = broker.issueState("a");
+    const state = flow(broker, "a");
     broker.publishAuthorization("a", state, new URL("https://auth.example/authorize"));
     now += 10 * 60_000;
     assert.strictEqual(broker.authorizationUrl("a"), undefined);
-    assert.strictEqual(broker.consume(state), undefined);
-    assert.strictEqual(broker.consume(state), undefined);
+    assert.throws(() => broker.consume(state), refusal("invalid"));
+    assert.throws(() => broker.consume(state), refusal("invalid"));
   });
 
-  await test("broker: a new state cancels the previous one of the same server only", () => {
+  await test("broker: a new state supersedes the previous one of the same server only, and says so", () => {
     const broker = new AuthorizationBroker();
-    const first = broker.issueState("a");
-    const other = broker.issueState("b");
-    const second = broker.issueState("a");
-    assert.strictEqual(broker.consume(first), undefined);
-    assert.strictEqual(broker.consume(second), "a");
-    assert.strictEqual(broker.consume(other), "b");
+    const first = flow(broker, "a", "first");
+    const other = flow(broker, "b");
+    const second = flow(broker, "a", "second");
+    assert.strictEqual(broker.serverOf(first), "a", "a superseded state still names its server");
+    assert.throws(() => broker.consume(first), refusal("superseded"));
+    assert.throws(() => broker.consume(first), refusal("invalid"));
+    assert.deepStrictEqual(broker.consume(second), { key: "a", verifier: "second" });
+    assert.deepStrictEqual(broker.consume(other), { key: "b", verifier: "verifier-b" });
   });
 
-  await test("broker: publishing with a stale or unknown state throws", () => {
+  await test("broker: publishing or setting a verifier with a stale or unknown state throws", () => {
     const broker = new AuthorizationBroker();
     const first = broker.issueState("a");
     broker.issueState("a");
     assert.throws(() => broker.publishAuthorization("a", first, new URL("https://auth.example/")));
     assert.throws(() => broker.publishAuthorization("z", first, new URL("https://auth.example/")));
+    assert.throws(() => broker.setVerifier("a", first, "v"));
   });
 
   // --- provider ---
@@ -213,34 +226,63 @@ async function run() {
     });
   });
 
-  await test("provider: saveTokens keeps the old refresh token and clears the verifier", async () => {
+  await test("provider: saveTokens keeps the old refresh token; the verifier is never stored", async () => {
     await withDir(async (dir) => {
       const store = new CredentialStore(dir);
       await store.prepare("a", endpoint);
-      const p = provider(store);
+      const broker = new AuthorizationBroker();
+      const p = provider(store, broker);
       p.interactive = true;
+      p.state();
       p.saveCodeVerifier("verifier-123");
       await p.saveTokens({ access_token: "a1", refresh_token: "r1", token_type: "bearer" });
       await p.saveTokens({ access_token: "a2", token_type: "bearer" });
       assert.deepStrictEqual(await p.tokens(), { access_token: "a2", refresh_token: "r1", token_type: "bearer" });
-      assert.throws(() => p.codeVerifier(), /verifier/);
+      assert.throws(() => p.codeVerifier(), /verifier/, "only an exchange in progress has a verifier");
       assert.ok(!(await readFile(store.filePath, "utf8")).includes("verifier-123"));
     });
   });
 
-  await test("provider: background mode publishes nothing and keeps no verifier", async () => {
+  await test("provider: the verifier of an exchange is the one it was given, not the last one saved", async () => {
+    await withDir(async (dir) => {
+      const store = new CredentialStore(dir);
+      await store.prepare("a", endpoint);
+      const broker = new AuthorizationBroker();
+      const p = provider(store, broker);
+      p.interactive = true;
+      const first = p.state();
+      p.saveCodeVerifier("first");
+      p.state();
+      p.saveCodeVerifier("second");
+      assert.throws(() => broker.consume(first), refusal("superseded"));
+      p.exchangeVerifier = "first";
+      assert.strictEqual(p.codeVerifier(), "first");
+    });
+  });
+
+  await test("provider: background mode publishes nothing and cancels nothing", async () => {
     await withDir(async (dir) => {
       const broker = new AuthorizationBroker();
       const store = new CredentialStore(dir);
       await store.prepare("a", endpoint);
       const p = provider(store, broker);
-      const pending = broker.issueState("a");
+      const pending = flow(broker, "a");
       p.state();
       p.saveCodeVerifier("background");
       await p.redirectToAuthorization(new URL("https://auth.example/authorize"));
       assert.strictEqual(broker.authorizationUrl("a"), undefined);
-      assert.strictEqual(broker.consume(pending), "a", "a background refresh never cancels a pending authorization");
-      assert.throws(() => p.codeVerifier());
+      assert.deepStrictEqual(broker.consume(pending), { key: "a", verifier: "verifier-a" }, "a background refresh never cancels a pending authorization");
+    });
+  });
+
+  await test("provider: background redirect with a refresh token still stored is an outage, not a reason to ask for consent", async () => {
+    await withDir(async (dir) => {
+      const store = new CredentialStore(dir);
+      await store.prepare("a", endpoint);
+      const p = provider(store);
+      await p.redirectToAuthorization(new URL("https://auth.example/authorize"));
+      await p.saveTokens({ access_token: "a", refresh_token: "r", token_type: "bearer" });
+      await assert.rejects(p.redirectToAuthorization(new URL("https://auth.example/authorize")), /unavailable/);
     });
   });
 
@@ -265,6 +307,39 @@ async function run() {
       const p = provider(store, undefined, "preset");
       await p.saveClientInformation({ client_id: "registered" });
       assert.deepStrictEqual(await p.clientInformation(), { client_id: "preset" });
+    });
+  });
+
+  // --- child queue ---
+
+  await test("child queue: one item at a time; a timeout answers the caller and aborts the item, the queue moves on only when the work has settled", async () => {
+    await withDir(async (dir) => {
+      const child = new OAuthChild("a", endpoint, {}, {
+        broker: new AuthorizationBroker(),
+        store: new CredentialStore(dir),
+        redirectUrl: redirect,
+        pageUrl: "https://hub.example/",
+      });
+      const events: string[] = [];
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      let aborted = false;
+      const stuck = child.run(async (signal) => {
+        events.push("stuck:start");
+        await sleep(300); // work that ignores its signal
+        aborted = signal.aborted;
+        events.push("stuck:end");
+      }, 50);
+      const next = child.run(async () => {
+        events.push("next:start");
+        return "ok";
+      }, 1_000);
+      const started = Date.now();
+      await assert.rejects(stuck, /timed out/);
+      assert.ok(Date.now() - started < 250, "the caller was answered at the timeout");
+      assert.deepStrictEqual(events, ["stuck:start"], "the next item is still waiting");
+      assert.strictEqual(await next, "ok");
+      assert.deepStrictEqual(events, ["stuck:start", "stuck:end", "next:start"]);
+      assert.ok(aborted, "the item was told to stop");
     });
   });
 

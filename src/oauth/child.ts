@@ -2,12 +2,14 @@ import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.j
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InvalidClientError, InvalidGrantError, UnauthorizedClientError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { AuthorizationBroker } from "./broker.js";
+import { FlowRefusedError, type AuthorizationBroker, type Flow } from "./broker.js";
+import { HubError, OAuthTimeoutError } from "./errors.js";
 import { createNetworkPolicy, type NetworkPolicy } from "./network.js";
 import { HubOAuthProvider } from "./provider.js";
 import type { CredentialStore } from "./store.js";
 
-export const AUTH_TIMEOUT_MS = 30_000;
+export const CONNECT_TIMEOUT_MS = 30_000;
+export const CALL_TIMEOUT_MS = 60_000;
 
 export interface OAuthRuntime {
   broker: AuthorizationBroker;
@@ -38,24 +40,32 @@ export function isAuthError(error: unknown): boolean {
     || error instanceof UnauthorizedClientError;
 }
 
-export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+/**
+ * An error as it may be logged or shown to an agent: the message of the hub's own
+ * errors, otherwise only the class and HTTP status, never a message that SDK and
+ * remote errors can fill with a response body.
+ */
+export function describeError(error: unknown): string {
+  if (error instanceof HubError) return error.message;
+  if (error instanceof StreamableHTTPError) return `${error.name} (HTTP ${error.code})`;
+  return error instanceof Error ? error.name : "error";
 }
 
 /**
- * The OAuth side of one HTTP child. Every SDK `auth()` call (refresh, explicit
- * connect, code exchange) runs under one lock per child, so two refreshes never
- * race against a server that rotates refresh tokens.
+ * The OAuth side of one HTTP child. The SDK transport does the protocol
+ * (401, `WWW-Authenticate`, refresh, step-up) through the provider; this class
+ * only guarantees that nothing happens in parallel on one child: every
+ * operation (a request, a connect, an explicit authorization start, a code
+ * exchange) is an item of one serial queue. An item leaves the queue when its
+ * work has really settled; its timeout aborts the requests it is making, and a
+ * caller may be told about the timeout earlier, never the queue.
  */
 export class OAuthChild {
   readonly provider: HubOAuthProvider;
   readonly network: NetworkPolicy;
   private readonly endpoint: URL;
-  private authTail: Promise<unknown> = Promise.resolve();
+  private tail: Promise<void> = Promise.resolve();
+  private active?: AbortController;
 
   constructor(
     readonly name: string,
@@ -83,77 +93,76 @@ export class OAuthChild {
     return this.runtime.store.prepare(this.name, this.endpoint.toString());
   }
 
-  /**
-   * Fetch for the child's MCP transport: adds the bearer, and on a 401 refreshes
-   * once (under the lock) and retries. A 401 it cannot cure goes back to the SDK,
-   * which raises it as `StreamableHTTPError(401)`.
-   */
-  readonly fetch: FetchLike = async (url, init) => {
-    const send = async () => {
-      const token = (await this.provider.tokens())?.access_token;
-      const headers = new Headers(init?.headers);
-      if (token) headers.set("Authorization", `Bearer ${token}`);
-      return { token, response: await this.network.fetch(url, { ...init, headers }) };
-    };
-    const first = await send();
-    if (first.response.status !== 401 || !(await this.refresh(first.token))) return first.response;
-    await first.response.body?.cancel();
-    return (await send()).response;
+  /** The guarded fetch of this child's traffic, aborted with the queue item that is running. */
+  readonly fetch: FetchLike = (url, init) => {
+    const signal = this.active?.signal;
+    if (!signal) return this.network.fetch(url, init);
+    return this.network.fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
   };
 
-  /** True if a fresh access token is now stored; false if a human must authorize. */
-  private refresh(rejectedToken: string | undefined): Promise<boolean> {
-    return this.withAuthLock(async () => {
-      const tokens = await this.provider.tokens();
-      if (tokens && tokens.access_token !== rejectedToken) return true; // refreshed while we waited
-      if (!tokens?.refresh_token) return false;
-      this.provider.interactive = false;
-      const result = await auth(this.provider, { serverUrl: this.endpoint, fetchFn: this.network.fetch });
-      if (result === "AUTHORIZED") return true;
-      // The SDK falls through to a new authorization when the token endpoint is down:
-      // a refresh token still stored means nothing rejected it, so this is an outage.
-      if ((await this.provider.tokens())?.refresh_token) {
-        throw new Error(`OAuth refresh for "${this.name}" failed: the authorization server is unavailable`);
-      }
-      return false;
+  /**
+   * Run `work` once everything queued before it has settled. Rejects with a
+   * timeout after `timeoutMs` of running, aborting the requests of `work`.
+   */
+  run<T>(work: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.tail = this.tail.then(async () => {
+        const controller = new AbortController();
+        this.active = controller;
+        const timer = setTimeout(() => {
+          controller.abort();
+          reject(new OAuthTimeoutError());
+        }, timeoutMs);
+        try {
+          resolve(await work(controller.signal));
+        } catch (error) {
+          reject(error);
+        } finally {
+          clearTimeout(timer);
+          if (this.active === controller) this.active = undefined;
+        }
+      });
     });
   }
 
   /**
-   * Explicit "connect": drop tokens and discovery (and the client registration if it
-   * does not carry the current redirect URL), then start an authorization. Resolves
-   * to the authorization URL the broker published.
+   * Run `work` (inside the queue) as an explicit "connect": the stored tokens and
+   * discovery are dropped, and so is the client registration unless it carries
+   * the current redirect URL, so the SDK starts a fresh authorization and the
+   * provider publishes its URL. Resolves to that URL.
    */
-  startAuthorization(): Promise<string> {
-    return this.withAuthLock(async () => {
-      const info = (await this.provider.clientInformation()) as { redirect_uris?: string[] } | undefined;
-      const compatible = this.options.clientId !== undefined || info?.redirect_uris?.includes(this.runtime.redirectUrl.toString());
-      if (!compatible) await this.provider.invalidateCredentials("client");
-      await this.provider.invalidateCredentials("tokens");
-      await this.provider.invalidateCredentials("discovery");
-      this.provider.interactive = true;
-      try {
-        await auth(this.provider, { serverUrl: this.endpoint, fetchFn: this.network.fetch });
-      } finally {
-        this.provider.interactive = false;
-      }
-      const url = this.runtime.broker.authorizationUrl(this.name);
-      if (!url) throw new Error(`No authorization URL for "${this.name}"`);
-      return url;
-    });
+  async startAuthorization(work: () => Promise<unknown>): Promise<string> {
+    const info = (await this.provider.clientInformation()) as { redirect_uris?: string[] } | undefined;
+    const compatible = this.options.clientId !== undefined || info?.redirect_uris?.includes(this.runtime.redirectUrl.toString());
+    if (!compatible) await this.provider.invalidateCredentials("client");
+    await this.provider.invalidateCredentials("tokens");
+    await this.provider.invalidateCredentials("discovery");
+    this.provider.interactive = true;
+    try {
+      // The server answers 401; the SDK discovers, registers and hands the URL to the provider.
+      await work().catch((error) => {
+        if (!isAuthError(error)) throw error;
+      });
+    } finally {
+      this.provider.interactive = false;
+    }
+    const url = this.runtime.broker.authorizationUrl(this.name);
+    if (!url) throw new HubError(`The server "${this.name}" did not ask for authorization`);
+    return url;
   }
 
-  /** Exchange an authorization code (the SDK's `finishAuth`, without a transport). */
-  completeAuthorization(code: string): Promise<void> {
-    return this.withAuthLock(async () => {
-      const result = await auth(this.provider, { serverUrl: this.endpoint, authorizationCode: code, fetchFn: this.network.fetch });
+  /** Take the flow of a callback state (or refuse it) and exchange its code, with that flow's verifier. */
+  async completeAuthorization(state: string, code: string | undefined): Promise<boolean> {
+    const flow: Flow = this.runtime.broker.consume(state);
+    if (flow.key !== this.name) throw new FlowRefusedError("invalid");
+    if (code === undefined) return false;
+    this.provider.exchangeVerifier = flow.verifier;
+    try {
+      const result = await auth(this.provider, { serverUrl: this.endpoint, authorizationCode: code, fetchFn: this.fetch });
       if (result !== "AUTHORIZED") throw new UnauthorizedError("Authorization code was not accepted");
-    });
-  }
-
-  private withAuthLock<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.authTail.then(() => withTimeout(operation(), AUTH_TIMEOUT_MS, `OAuth operation for "${this.name}" timed out`));
-    this.authTail = run.catch(() => undefined);
-    return run;
+    } finally {
+      this.provider.exchangeVerifier = undefined;
+    }
+    return true;
   }
 }

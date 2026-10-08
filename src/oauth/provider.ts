@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { HubError } from "./errors.js";
 import type { AuthorizationBroker } from "./broker.js";
 import type { CredentialRecord, CredentialStore } from "./store.js";
 
@@ -15,13 +16,16 @@ export interface ProviderOptions {
  * client (`token_endpoint_auth_method: none`) unless a `clientId` is configured.
  * It never opens anything: in interactive mode it publishes the authorization URL
  * to the broker; otherwise (a background refresh) it leaves no trace, so a failed
- * refresh cannot cancel an authorization a human has started.
+ * refresh cannot cancel an authorization a human has started. The PKCE verifier
+ * belongs to the flow (kept by the broker under its state); the one the SDK reads
+ * during a code exchange is set by the caller for that exchange only.
  */
 export class HubOAuthProvider implements OAuthClientProvider {
-  /** Set by the child coordinator, under its auth lock, for an explicit "connect". */
+  /** Set by the child, inside its queue, while it runs an explicit "connect". */
   interactive = false;
+  /** Verifier of the flow whose code is being exchanged. */
+  exchangeVerifier?: string;
   private activeState?: string;
-  private verifier?: string;
 
   constructor(
     private readonly key: string,
@@ -68,23 +72,31 @@ export class HubOAuthProvider implements OAuthClientProvider {
       const previous = record.tokens?.refresh_token;
       return { ...record, tokens: tokens.refresh_token === undefined && previous !== undefined ? { ...tokens, refresh_token: previous } : tokens };
     });
-    this.verifier = undefined;
   }
 
+  /**
+   * Interactive: publish the URL for the human. In the background nothing is
+   * published (the SDK then reports "unauthorized", which means needs-auth) unless
+   * a refresh token is still stored: then nothing rejected the grant, the refresh
+   * simply could not complete, and that is an outage, never a reason to ask for consent.
+   */
   async redirectToAuthorization(url: URL): Promise<void> {
-    if (!this.interactive) return;
-    if (!this.activeState) throw new Error("OAuth provider did not issue a state");
+    if (!this.interactive) {
+      if ((await this.tokens())?.refresh_token) throw new HubError("the authorization server is unavailable");
+      return;
+    }
+    if (!this.activeState) throw new HubError("OAuth provider did not issue a state");
     await this.assertAuthorizationUrl(url);
     this.broker.publishAuthorization(this.key, this.activeState, url);
   }
 
   saveCodeVerifier(codeVerifier: string): void {
-    if (this.interactive) this.verifier = codeVerifier;
+    if (this.interactive && this.activeState) this.broker.setVerifier(this.key, this.activeState, codeVerifier);
   }
 
   codeVerifier(): string {
-    if (!this.verifier) throw new Error("OAuth PKCE verifier is missing");
-    return this.verifier;
+    if (!this.exchangeVerifier) throw new Error("OAuth PKCE verifier is missing");
+    return this.exchangeVerifier;
   }
 
   async saveDiscoveryState(discoveryState: OAuthDiscoveryState): Promise<void> {
@@ -98,10 +110,9 @@ export class HubOAuthProvider implements OAuthClientProvider {
   /**
    * Called by the SDK on `invalid_client` (all) and `invalid_grant` (tokens): this
    * is what turns those errors into a fresh authorization instead of a throw.
-   * Fields are cleared, the record and its endpoint binding are kept.
+   * (`verifier` is a no-op: verifiers belong to flows.) Fields are cleared, the record and its endpoint binding are kept.
    */
   async invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): Promise<void> {
-    if (scope === "all" || scope === "verifier") this.verifier = undefined;
     if (scope === "verifier") return;
     await this.store.update(this.key, (current) => {
       const next = { ...prepared(current) };

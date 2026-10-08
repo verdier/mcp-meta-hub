@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { VERSION, type ServerConfig } from "./types.js";
 
@@ -63,8 +64,13 @@ export function childEnv(
   return { ...env, ...(declared ? resolveEnvRefs(declared, base) : {}) };
 }
 
-/** `fetch` replaces the HTTP stack of a streamable-http child (OAuth children). */
-export async function connectServer(name: string, config: ServerConfig, fetch?: FetchLike): Promise<ConnectedServer> {
+/** An OAuth child: the SDK transport authenticates through `authProvider`, over `fetch`. */
+export interface OAuthTransport {
+  authProvider: OAuthClientProvider;
+  fetch: FetchLike;
+}
+
+export async function connectServer(name: string, config: ServerConfig, oauth?: OAuthTransport, signal?: AbortSignal): Promise<ConnectedServer> {
   const client = new Client({ name: `mcp-meta-hub/${name}`, version: VERSION });
 
   if (isStdioConfig(config)) {
@@ -97,9 +103,9 @@ export async function connectServer(name: string, config: ServerConfig, fetch?: 
   const urlConfig = config as { url: string; headers?: Record<string, string> };
   const transport = new StreamableHTTPClientTransport(new URL(urlConfig.url), {
     requestInit: urlConfig.headers ? { headers: urlConfig.headers } : undefined,
-    fetch,
+    ...oauth,
   });
-  await client.connect(transport);
+  await client.connect(transport, signal && { signal });
   return {
     name,
     client,

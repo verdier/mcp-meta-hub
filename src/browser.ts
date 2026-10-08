@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Hub } from "./hub.js";
-import type { OAuthRuntime } from "./oauth/child.js";
+import { FlowRefusedError } from "./oauth/broker.js";
+import { describeError, type OAuthRuntime } from "./oauth/child.js";
 
 const log = (msg: string) => console.error(`[mcp-meta-hub] ${msg}`);
 
@@ -31,10 +32,10 @@ function message(res: ServerResponse, status: number, title: string, text: strin
   page(res, status, title, `<p>${escapeHtml(text)}</p>`);
 }
 
-function hostname(req: IncomingMessage): string | undefined {
 /** `host[:port]` and nothing else: no userinfo, path, query or fragment to be parsed away. */
 const HOST = /^(\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::\d{1,5})?$/i;
 
+function hostname(req: IncomingMessage): string | undefined {
   return HOST.exec(req.headers.host ?? "")?.[1]?.toLowerCase();
 }
 
@@ -80,37 +81,44 @@ export function createBrowserSurface(hub: Hub, oauth: OAuthRuntime) {
       return;
     }
     try {
-      const url = await child.startAuthorization();
+      const url = await hub.startAuthorization(name);
       log(`OAuth authorization started for "${name}"`);
       res.writeHead(303, { ...HEADERS, Location: url });
       res.end();
     } catch (err) {
-      log(`OAuth authorization could not start for "${name}": ${err instanceof Error ? err.message : err}`);
+      log(`OAuth authorization could not start for "${name}": ${describeError(err)}`);
       message(res, 502, "Authorization unavailable", "The authorization could not start. See the hub's log.");
     }
   }
 
   async function callback(res: ServerResponse, search: URLSearchParams): Promise<void> {
     const params = callbackParams(search);
-    // The state is consumed before anything else: a callback is never replayed.
-    const name = params && oauth.broker.consume(params.state);
-    if (!params || !name) {
+    const name = params && oauth.broker.serverOf(params.state);
+    if (!params || !name || !hub.oauthChild(name)) {
       message(res, 400, "Authorization failed", "The callback is invalid, expired or already used.");
       return;
     }
-    if (params.error !== undefined) {
+    // The state is consumed inside the child's queue, with the code exchange and the reconnect: one transaction.
+    let status;
+    try {
+      status = await hub.completeAuthorization(name, params.state, params.error === undefined ? params.code : undefined);
+    } catch (err) {
+      if (err instanceof FlowRefusedError && err.reason === "superseded") {
+        log(`OAuth callback for "${name}" refused: superseded by a newer start`);
+        message(res, 400, "Authorization superseded", "A newer authorization was started for this server. Start again.");
+      } else if (err instanceof FlowRefusedError) {
+        message(res, 400, "Authorization failed", "The callback is invalid, expired or already used.");
+      } else {
+        log(`OAuth code exchange failed for "${name}": ${describeError(err)}`);
+        message(res, 400, "Authorization failed", "The authorization server rejected the exchange.");
+      }
+      return;
+    }
+    if (status === undefined) {
       log(`OAuth authorization for "${name}" was not granted`);
       message(res, 400, "Authorization failed", "The authorization was not granted.");
       return;
     }
-    try {
-      await hub.oauthChild(name)!.completeAuthorization(params.code!);
-    } catch (err) {
-      log(`OAuth code exchange failed for "${name}": ${err instanceof Error ? err.message : err}`);
-      message(res, 400, "Authorization failed", "The authorization server rejected the exchange.");
-      return;
-    }
-    const status = await hub.reconnect(name);
     log(`OAuth authorization completed for "${name}", now ${status}`);
     if (status === "connected") message(res, 200, "Connected", "The server is connected. You can close this window.");
     else message(res, 502, "Authorized, not connected", "The authorization succeeded but the server could not be reached. See the hub's log.");

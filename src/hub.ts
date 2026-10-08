@@ -1,9 +1,9 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Config, CatalogEntry, CallToolResult, ServerConfig } from "./types.js";
 import { resolve } from "node:path";
 import { connectServer, type ConnectedServer } from "./transports.js";
 import { AuthorizationBroker } from "./oauth/broker.js";
-import { AUTH_TIMEOUT_MS, isAuthError, OAuthChild, withTimeout, type OAuthRuntime } from "./oauth/child.js";
+import { CALL_TIMEOUT_MS, CONNECT_TIMEOUT_MS, describeError, isAuthError, OAuthChild, type OAuthRuntime } from "./oauth/child.js";
 import { CredentialStore } from "./oauth/store.js";
 
 /** Names taken by the hub's own meta-tools. */
@@ -44,15 +44,25 @@ interface Slot {
   generation: number;
   live?: Live;
   oauth?: OAuthChild;
+  /** The OAuth setup of this child failed: it stays `failed`, the others are unaffected. */
+  broken?: boolean;
 }
 
 const DRAIN_TIMEOUT_MS = 30_000;
+
+export interface HubOptions {
+  /** Bounds on an OAuth child's connect / authorization step and on a call to it (test seam). */
+  connectTimeoutMs?: number;
+  callTimeoutMs?: number;
+}
 
 export class Hub {
   private slots: Map<string, Slot> = new Map();
   private catalog: Map<string, CatalogEntry> = new Map();
   /** Set when the config has an `oauth` section. */
   oauth?: OAuthRuntime;
+
+  constructor(private readonly options: HubOptions = {}) {}
 
   async start(config: Config): Promise<void> {
     if (config.oauth) {
@@ -67,8 +77,14 @@ export class Hub {
     for (const [name, serverConfig] of Object.entries(config.servers)) {
       const slot: Slot = { config: serverConfig, status: "failed", generation: 0 };
       if ("oauth" in serverConfig && serverConfig.oauth && this.oauth) {
-        slot.oauth = new OAuthChild(name, serverConfig.url, serverConfig.oauth === true ? {} : serverConfig.oauth, this.oauth);
-        await slot.oauth.prepare();
+        try {
+          const child = new OAuthChild(name, serverConfig.url, serverConfig.oauth === true ? {} : serverConfig.oauth, this.oauth);
+          await child.prepare();
+          slot.oauth = child;
+        } catch (err) {
+          slot.broken = true;
+          log(`OAuth setup of "${name}" failed: ${err instanceof Error ? err.message : "invalid options"}`);
+        }
       }
       this.slots.set(name, slot);
     }
@@ -81,50 +97,84 @@ export class Hub {
     log(`Ready — ${this.catalog.size} tools from ${connected} server(s)`);
   }
 
-  /** Connect a new generation of `name` and install it (or its failure). */
-  async reconnect(name: string): Promise<ServerStatus> {
-    (await this.connect(name))();
-    return this.slots.get(name)!.status;
-  }
-
   /**
    * Connect a new generation of `name`; resolve to the synchronous step that
    * installs the result, a no-op if a newer generation started meanwhile.
    */
-  private async connect(name: string): Promise<() => void> {
+  private connect(name: string): Promise<() => void> {
     const slot = this.slots.get(name)!;
+    if (slot.broken) return Promise.resolve(() => undefined);
     const generation = ++slot.generation;
-    const stale = () => generation !== slot.generation;
-    const attempt = (async () => {
-      const server = await connectServer(name, slot.config, slot.oauth?.fetch);
-      try {
-        return { server, tools: (await server.client.listTools()).tools };
-      } catch (err) {
-        await server.cleanup().catch(() => undefined);
-        throw err;
-      }
-    })();
+    if (!slot.oauth) return this.attempt(name, slot, generation);
+    // An OAuth child connects inside its queue, bounded: a stuck authorization server must not hold the slot.
+    return slot.oauth
+      .run((signal) => this.attempt(name, slot, generation, signal), this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS)
+      .catch((err) => this.failure(name, slot, generation, err));
+  }
+
+  /** Open the server and list its tools, resolving to the installer; never throws. */
+  private async attempt(name: string, slot: Slot, generation: number, signal?: AbortSignal): Promise<() => void> {
     try {
-      // OAuth children are bounded: a stuck authorization server must not hold the slot.
-      const { server, tools } = slot.oauth
-        ? await withTimeout(attempt, AUTH_TIMEOUT_MS, `Connecting to "${name}" timed out`).catch((err) => {
-          void attempt.then((late) => late.server.cleanup(), () => undefined);
-          throw err;
-        })
-        : await attempt;
+      const { server, tools } = await this.open(name, slot, signal);
       return () => {
-        if (stale()) void server.cleanup().catch(() => undefined);
+        if (generation !== slot.generation) void server.cleanup().catch(() => undefined);
         else this.replaceServer(name, server, tools);
       };
     } catch (err) {
-      return () => {
-        if (stale()) return;
-        slot.status = slot.oauth && isAuthError(err) ? "needs-auth" : "failed";
-        log(slot.status === "needs-auth"
-          ? `"${name}" needs authorization: open ${this.oauth!.pageUrl}`
-          : `Failed to connect to "${name}": ${err}`);
-      };
+      return this.failure(name, slot, generation, err);
     }
+  }
+
+  private async open(name: string, slot: Slot, signal?: AbortSignal): Promise<{ server: ConnectedServer; tools: Tool[] }> {
+    const oauth = slot.oauth && { authProvider: slot.oauth.provider, fetch: slot.oauth.fetch };
+    const server = await connectServer(name, slot.config, oauth, signal);
+    try {
+      const tools = (await server.client.listTools(undefined, signal && { signal })).tools;
+      signal?.throwIfAborted();
+      return { server, tools };
+    } catch (err) {
+      await server.cleanup().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private failure(name: string, slot: Slot, generation: number, err: unknown): () => void {
+    return () => {
+      if (generation !== slot.generation) return;
+      slot.status = slot.oauth && isAuthError(err) ? "needs-auth" : "failed";
+      log(slot.status === "needs-auth"
+        ? `"${name}" needs authorization: open ${this.oauth!.pageUrl}`
+        : `Failed to connect to "${name}": ${slot.oauth ? describeError(err) : err}`);
+    };
+  }
+
+  /**
+   * An explicit "connect" of an OAuth child: a fresh authorization, started inside
+   * the child's queue. Resolves to the URL to send the browser to.
+   */
+  startAuthorization(name: string): Promise<string> {
+    const slot = this.slots.get(name)!;
+    const child = slot.oauth!;
+    return child.run(
+      (signal) => child.startAuthorization(async () => (await this.open(name, slot, signal)).server.cleanup()),
+      this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * The callback of an authorization: take the flow of `state`, exchange `code`
+   * and reconnect the child, as one item of its queue. Resolves to the child's
+   * new status, or undefined if the provider denied the authorization.
+   */
+  async completeAuthorization(name: string, state: string, code: string | undefined): Promise<ServerStatus | undefined> {
+    const slot = this.slots.get(name)!;
+    const child = slot.oauth!;
+    const install = await child.run(async (signal) => {
+      if (!(await child.completeAuthorization(state, code))) return undefined;
+      return this.attempt(name, slot, ++slot.generation, signal);
+    }, this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+    install?.();
+    return install && slot.status;
   }
 
   /**
@@ -256,10 +306,13 @@ export class Hub {
 
     live.inFlight++;
     try {
-      const result = await live.server.client.callTool({
-        name: entry.originalName,
-        arguments: args,
-      });
+      const call = (signal?: AbortSignal) => live.server.client.callTool(
+        { name: entry.originalName, arguments: args },
+        undefined,
+        signal && { signal },
+      );
+      // An OAuth child takes one operation at a time, so a refresh a call triggers never overlaps another.
+      const result = slot.oauth ? await slot.oauth.run(call, this.options.callTimeoutMs ?? CALL_TIMEOUT_MS) : await call();
       return result as CallToolResult;
     } catch (err) {
       if (slot.oauth && isAuthError(err) && live.generation === slot.generation) {
@@ -267,7 +320,9 @@ export class Hub {
         slot.status = "needs-auth";
         return this.needsAuthorization(entry.serverName);
       }
-      return toolError(`Tool "${name}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      // An OAuth child's errors may carry a response body: protocol errors keep their message, the rest only their class.
+      const detail = slot.oauth && !(err instanceof McpError) ? describeError(err) : err instanceof Error ? err.message : String(err);
+      return toolError(`Tool "${name}" failed: ${detail}`);
     } finally {
       if (--live.inFlight === 0) live.drained?.();
     }

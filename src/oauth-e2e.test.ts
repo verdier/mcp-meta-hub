@@ -6,30 +6,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { request, type Server as HttpServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import { Hub } from "./hub.js";
 import { startHttp } from "./http.js";
-import { FakeOAuthServer } from "./oauth-fake.js";
+import { FakeOAuthServer, freePort } from "./oauth-fake.js";
 import { STORE_FILE } from "./oauth/store.js";
 import { createRunner } from "./test-runner.js";
 import type { Config } from "./types.js";
 
 type TextContent = { type: string; text: string };
 const TOKEN = "oauth-e2e-token";
-
-function freePort(): Promise<number> {
-  return new Promise((res, rej) => {
-    const s = createNetServer();
-    s.once("error", rej);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address() as { port: number };
-      s.close(() => res(port));
-    });
-  });
-}
 
 /** Raw request, for headers fetch will not let us set (Host). */
 function raw(port: number, opts: { method?: string; path: string; headers?: Record<string, string> }): Promise<{ status: number; headers: Record<string, unknown>; body: string }> {
@@ -60,6 +48,8 @@ async function run() {
       weather: { command: "node", args: ["examples/weather/dist/index.js"], prefix: "fake__" },
       // Same private endpoint without allowPrivateNetwork: the network guard must refuse it.
       guarded: { transport: "streamable-http", url: `${fake.origin}/mcp`, oauth: true },
+      // Options that did not go through config validation: this child fails, nothing else does.
+      malformed: { transport: "streamable-http", url: `${fake.origin}/mcp`, oauth: { allowedOrigins: ["https://auth.example/not-an-origin"] } },
     },
     clients: { test: { tokenEnv: "UNUSED" } },
     oauth: { redirectUrl: `${hubOrigin}/oauth/callback`, storeDir },
@@ -111,6 +101,12 @@ async function run() {
       assert.strictEqual(status("guarded"), "failed");
       const s = await start("guarded");
       assert.strictEqual(s.status, 502);
+    });
+
+    await test("a child whose OAuth setup is invalid is failed; the hub and its neighbours are not", async () => {
+      assert.strictEqual(status("malformed"), "failed");
+      assert.strictEqual(status("weather"), "connected");
+      assert.strictEqual((await start("malformed")).status, 404, "no OAuth child to start");
     });
 
     await test("status page: every child, its state, a connect form, safe headers", async () => {
@@ -308,14 +304,14 @@ async function run() {
       assert.strictEqual(fake.counts.authorize + fake.counts.register, before);
       assert.strictEqual(status("fake"), "connected", "a refused start does not touch the grant");
     });
-      for (const host of ["127.0.0.1#@evil.example", "127.0.0.1?x", "127.0.0.1/path", "127.0.0.1@evil.example", "evil.example#127.0.0.1", "localhost:80x", "127.0.0.1:"]) {
-        assert.strictEqual((await raw(port, { path: "/", headers: { Host: host } })).status, 403, host);
-        assert.strictEqual((await raw(port, { path: "/oauth/callback?state=x", headers: { Host: host } })).status, 403, host);
-      }
 
     await test("browser routes: Host allowlist, methods, unknown servers", async () => {
       assert.strictEqual((await raw(port, { path: "/", headers: { Host: "evil.example" } })).status, 403);
       assert.strictEqual((await raw(port, { path: "/", headers: { Host: `localhost:${port}` } })).status, 200);
+      for (const host of ["127.0.0.1#@evil.example", "127.0.0.1?x", "127.0.0.1/path", "127.0.0.1@evil.example", "evil.example#127.0.0.1", "localhost:80x", "127.0.0.1:"]) {
+        assert.strictEqual((await raw(port, { path: "/", headers: { Host: host } })).status, 403, host);
+        assert.strictEqual((await raw(port, { path: "/oauth/callback?state=x", headers: { Host: host } })).status, 403, host);
+      }
       assert.strictEqual((await raw(port, { path: "/oauth/callback?state=x", headers: { Host: "evil.example" } })).status, 403);
       assert.strictEqual((await fetch(`${hubOrigin}/oauth/start/fake`)).status, 405);
       assert.strictEqual((await fetch(`${hubOrigin}/`, { method: "POST" })).status, 405);

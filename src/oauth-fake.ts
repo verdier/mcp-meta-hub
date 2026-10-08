@@ -6,7 +6,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -22,6 +22,34 @@ export interface FakeBehaviour {
   tools: string[];
   /** Published as authorization_endpoint instead of the real one. */
   authorizationEndpoint?: string;
+  /** Refresh responses carry the access token the server issued first, re-validated. */
+  reuseAccessToken?: boolean;
+  /** The code grant answers after this long. */
+  codeDelayMs?: number;
+  /** The token endpoint answers 400 with this (non-JSON) body. */
+  tokenRawBody?: string;
+  /** Authorization server metadata answers after this long. */
+  metadataDelayMs?: number;
+  /** `tools/call` of these tools answers 401 whatever the token. */
+  unauthorizedTools?: string[];
+  /** `tools/call` of these tools needs a token holding scope "special" (else 403 insufficient_scope). */
+  scopeGatedTools?: string[];
+  /** Refresh grants issue tokens holding scope "special". */
+  refreshGrantsSpecial?: boolean;
+  /** The protected-resource metadata lives only at the URL the 401 challenge names, plus its scope. */
+  challengeOnlyMetadata?: boolean;
+  challengeScope?: string;
+}
+
+export function freePort(): Promise<number> {
+  return new Promise((res, rej) => {
+    const s = createNetServer();
+    s.once("error", rej);
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address() as { port: number };
+      s.close(() => res(port));
+    });
+  });
 }
 
 const b64url = (buf: Buffer) => buf.toString("base64url");
@@ -30,12 +58,16 @@ const random = () => b64url(randomBytes(24));
 export class FakeOAuthServer {
   origin = "";
   behaviour: FakeBehaviour = { rotate: true, omitRefreshToken: false, always401: false, tokenDelayMs: 0, tools: ["echo", "slow", "list_cities"] };
-  readonly counts = { register: 0, authorize: 0, codeGrant: 0, refreshGrant: 0, mcp: 0 };
+  readonly counts = { register: 0, authorize: 0, codeGrant: 0, refreshGrant: 0, mcp: 0, challengeMetadata: 0, wellKnownMetadata: 0 };
   readonly clients = new Map<string, { redirect_uris: string[] }>();
   readonly authorizeRequests: URLSearchParams[] = [];
   private codes = new Map<string, { clientId: string; redirectUri: string; challenge: string }>();
   private access = new Set<string>();
   private refresh = new Map<string, string>();
+  private special = new Set<string>();
+  private fixedAccess?: string;
+  /** Which grant issued an access token. */
+  readonly issuedBy = new Map<string, "code" | "refresh">();
   private http?: HttpServer;
 
   async start(): Promise<void> {
@@ -66,9 +98,12 @@ export class FakeOAuthServer {
     return data;
   }
 
-  private issueTokens(clientId: string, refreshToken = true): Record<string, unknown> {
-    const access = random();
+  private issueTokens(clientId: string, grant: "code" | "refresh", refreshToken = true): Record<string, unknown> {
+    const reuse = grant === "refresh" && this.behaviour.reuseAccessToken;
+    const access = reuse ? (this.fixedAccess ??= random()) : random();
     this.access.add(access);
+    this.issuedBy.set(access, grant);
+    if (grant === "refresh" && this.behaviour.refreshGrantsSpecial) this.special.add(access);
     const tokens: Record<string, unknown> = { access_token: access, token_type: "Bearer", expires_in: 3600 };
     if (refreshToken) {
       const rt = random();
@@ -82,10 +117,17 @@ export class FakeOAuthServer {
     const url = new URL(req.url!, this.origin);
     const path = url.pathname;
 
+    if (path === "/resource-info") {
+      this.counts.challengeMetadata++;
+      return this.json(res, 200, { resource: `${this.origin}/mcp`, authorization_servers: [this.origin] });
+    }
     if (path.startsWith("/.well-known/oauth-protected-resource")) {
+      this.counts.wellKnownMetadata++;
+      if (this.behaviour.challengeOnlyMetadata) return this.json(res, 404, {});
       return this.json(res, 200, { resource: `${this.origin}/mcp`, authorization_servers: [this.origin] });
     }
     if (path === "/.well-known/oauth-authorization-server") {
+      await new Promise((r) => setTimeout(r, this.behaviour.metadataDelayMs ?? 0));
       return this.json(res, 200, {
         issuer: this.origin,
         authorization_endpoint: this.behaviour.authorizationEndpoint ?? `${this.origin}/authorize`,
@@ -125,6 +167,11 @@ export class FakeOAuthServer {
       const form = new URLSearchParams(await this.body(req));
       if (form.get("grant_type") === "authorization_code") {
         this.counts.codeGrant++;
+        await new Promise((r) => setTimeout(r, this.behaviour.codeDelayMs ?? 0));
+        if (this.behaviour.tokenRawBody !== undefined) {
+          res.writeHead(400, { "Content-Type": "text/plain" }).end(this.behaviour.tokenRawBody);
+          return;
+        }
         const code = this.codes.get(form.get("code") ?? "");
         this.codes.delete(form.get("code") ?? "");
         const verifier = form.get("code_verifier") ?? "";
@@ -132,7 +179,7 @@ export class FakeOAuthServer {
           || b64url(createHash("sha256").update(verifier).digest()) !== code.challenge) {
           return this.json(res, 400, { error: "invalid_grant" });
         }
-        return this.json(res, 200, this.issueTokens(code.clientId));
+        return this.json(res, 200, this.issueTokens(code.clientId, "code"));
       }
       if (form.get("grant_type") === "refresh_token") {
         this.counts.refreshGrant++;
@@ -146,21 +193,33 @@ export class FakeOAuthServer {
           res.writeHead(503).end("unavailable");
           return;
         }
+        if (this.behaviour.tokenRawBody !== undefined) {
+          res.writeHead(400, { "Content-Type": "text/plain" }).end(this.behaviour.tokenRawBody);
+          return;
+        }
         if (failure) return this.json(res, failure === "invalid_client" ? 401 : 400, { error: failure });
         const rt = form.get("refresh_token") ?? "";
         const clientId = this.refresh.get(rt);
         if (!clientId || clientId !== form.get("client_id")) return this.json(res, 400, { error: "invalid_grant" });
-        if (this.behaviour.omitRefreshToken) return this.json(res, 200, this.issueTokens(clientId, false));
+        if (this.behaviour.omitRefreshToken) return this.json(res, 200, this.issueTokens(clientId, "refresh", false));
         if (this.behaviour.rotate) this.refresh.delete(rt);
-        return this.json(res, 200, this.issueTokens(clientId));
+        return this.json(res, 200, this.issueTokens(clientId, "refresh"));
       }
       return this.json(res, 400, { error: "unsupported_grant_type" });
     }
     if (path === "/mcp") {
       this.counts.mcp++;
       const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
-      if (this.behaviour.always401 || !token || !this.access.has(token)) {
-        res.writeHead(401, { "WWW-Authenticate": `Bearer resource_metadata="${this.origin}/.well-known/oauth-protected-resource/mcp"` }).end();
+      const body = req.method === "POST" ? JSON.parse(await this.body(req) || "null") : undefined;
+      const tool = body?.method === "tools/call" ? (body.params?.name as string) : undefined;
+      const challenge = `resource_metadata="${this.origin}${this.behaviour.challengeOnlyMetadata ? "/resource-info" : "/.well-known/oauth-protected-resource/mcp"}"`;
+      if (this.behaviour.always401 || !token || !this.access.has(token) || (tool && this.behaviour.unauthorizedTools?.includes(tool))) {
+        const scope = this.behaviour.challengeScope ? `, scope="${this.behaviour.challengeScope}"` : "";
+        res.writeHead(401, { "WWW-Authenticate": `Bearer ${challenge}${scope}` }).end();
+        return;
+      }
+      if (tool && this.behaviour.scopeGatedTools?.includes(tool) && !this.special.has(token)) {
+        res.writeHead(403, { "WWW-Authenticate": `Bearer error="insufficient_scope", scope="special", ${challenge}` }).end();
         return;
       }
       if (req.method !== "POST") {
@@ -174,7 +233,7 @@ export class FakeOAuthServer {
         void server.close();
       });
       await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, body);
       return;
     }
     res.writeHead(404).end();
