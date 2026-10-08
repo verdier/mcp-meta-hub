@@ -60,20 +60,20 @@ export class Hub {
     if (Array.isArray(always)) {
       const known = new Set(tools.map((t) => t.name));
       for (const name of always) {
-        if (!known.has(name)) log(`Warning: "always" lists unknown tool "${name}" on "${serverName}"`);
+        if (!known.has(name)) log(`Warning: "always" lists unknown tool ${JSON.stringify(name)} on "${serverName}"`);
       }
     }
 
     for (const tool of tools) {
       const qualifiedName = prefixFn(tool.name);
       if (META_TOOL_NAMES.includes(qualifiedName) || this.catalog.has(qualifiedName)) {
-        log(`Error: tool "${qualifiedName}" from "${serverName}" collides with an existing name, skipped`);
+        log(`Error: tool ${JSON.stringify(qualifiedName)} from "${serverName}" collides with an existing name, skipped`);
         continue;
       }
 
       let isAlways = always === true || (Array.isArray(always) && always.includes(tool.name));
       if (isAlways && tool.inputSchema?.type !== "object") {
-        log(`Warning: "${qualifiedName}" has no object inputSchema, not listed directly`);
+        log(`Warning: ${JSON.stringify(qualifiedName)} has no object inputSchema, not listed directly`);
         isAlways = false;
       }
 

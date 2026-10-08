@@ -1,6 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { Hub } from "./hub.js";
+import { META_TOOL_NAMES, type Hub } from "./hub.js";
 import { VERSION, type CallToolResult } from "./types.js";
 
 const LIST_TOOLS = {
@@ -95,6 +95,8 @@ export function createMcpServer(hub: Hub): Server {
         result = fail('Invalid arguments: "name" is required and must be a string.');
       } else if (innerArgs !== undefined && !isRecord(innerArgs)) {
         result = fail('Invalid arguments: "arguments" must be an object.');
+      } else if (META_TOOL_NAMES.includes(innerName)) {
+        result = fail(`"${innerName}" is a meta-tool, call it directly.`);
       } else {
         target = innerName;
         result = await hub.callTool(innerName, innerArgs ?? {});
@@ -107,7 +109,7 @@ export function createMcpServer(hub: Hub): Server {
 
     const client = extra.authInfo?.clientId ?? "stdio";
     console.error(
-      `[mcp-meta-hub] call client=${client} tool=${target} result=${result.isError ? "error" : "ok"} duration=${Date.now() - started}ms`,
+      `[mcp-meta-hub] call client=${client} tool=${JSON.stringify(target)} result=${result.isError ? "error" : "ok"} duration=${Date.now() - started}ms`,
     );
     return result as never;
   });
