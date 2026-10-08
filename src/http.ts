@@ -6,6 +6,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Config } from "./types.js";
 import type { Hub } from "./hub.js";
 import { createMcpServer } from "./meta-tools.js";
+import { createBrowserSurface } from "./browser.js";
 
 type Req = IncomingMessage & { body?: unknown; auth?: AuthInfo };
 
@@ -89,7 +90,8 @@ const methodNotAllowed = (_req: Req, res: ServerResponse) => jsonRpcError(res, 4
 
 /**
  * Serve the hub over stateless Streamable HTTP on `/mcp`: no session, a fresh
- * MCP server and transport per request.
+ * MCP server and transport per request. With an `oauth` config, the browser
+ * surface (status page, connect, callback) answers its exact paths first.
  */
 export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, string>): Promise<HttpServer> {
   const app = createMcpExpressApp({ host: addr.host });
@@ -123,9 +125,12 @@ export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, strin
     jsonRpcError(res, status, status === 500 ? -32603 : -32700, status === 500 ? "Internal server error" : "Parse error");
   }) as never);
 
-  // The bearer gate wraps the whole app: nothing, not even body parsing, runs before it.
+  // The bearer gate wraps the whole MCP app: nothing, not even body parsing, runs before it.
+  // Only the browser surface's own paths bypass it, and never reach the MCP app.
   const gate = authenticate(tokens);
+  const browser = hub.oauth ? createBrowserSurface(hub, hub.oauth) : undefined;
   const httpServer = createServer((req, res) => {
+    if (browser?.(req, res)) return;
     if (gate(req, res)) (app as unknown as (q: IncomingMessage, r: ServerResponse) => void)(req, res);
   });
 
