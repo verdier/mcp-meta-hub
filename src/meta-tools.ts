@@ -1,43 +1,41 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { META_TOOL_NAMES, type Hub } from "./hub.js";
+import { z } from "zod";
+import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
+import { META_TOOL_NAMES, toolError, unknownTool, type Hub } from "./hub.js";
 import { VERSION, type CallToolResult } from "./types.js";
 
-const LIST_TOOLS = {
-  name: "list_tools",
-  description:
-    "List available tools across all connected MCP servers. Use a prefix to filter by server name (e.g. \"weather\" returns all weather__* tools).",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      prefix: { type: "string", description: "Filter tools by prefix (typically a server name)" },
-    },
+const ListToolsArgs = z.object({
+  prefix: z.string().optional().describe("Filter tools by prefix (typically a server name)"),
+});
+
+const CallToolArgs = z.object({
+  name: z.string().min(1).describe("Fully qualified tool name (server__tool)"),
+  arguments: z.record(z.unknown()).optional().describe("Arguments to pass to the tool"),
+});
+
+const schemaOf = (schema: z.AnyZodObject) =>
+  toJsonSchemaCompat(schema, { strictUnions: true, pipeStrategy: "input" }) as { type: "object" };
+
+const META_TOOLS = [
+  {
+    name: "list_tools",
+    description:
+      "List available tools across all connected MCP servers. Use a prefix to filter by server name (e.g. \"weather\" returns all weather__* tools).",
+    inputSchema: schemaOf(ListToolsArgs),
   },
-};
-
-const CALL_TOOL = {
-  name: "call_tool",
-  description:
-    "Call a tool by its fully qualified name (e.g. \"weather__get_forecast\"). Use list_tools first to discover available tools and their schemas.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      name: { type: "string", description: "Fully qualified tool name (server__tool)" },
-      arguments: { type: "object", description: "Arguments to pass to the tool" },
-    },
-    required: ["name"],
+  {
+    name: "call_tool",
+    description:
+      "Call a tool by its fully qualified name (e.g. \"weather__get_forecast\"). Use list_tools first to discover available tools and their schemas.",
+    inputSchema: schemaOf(CallToolArgs),
   },
-};
+];
 
-const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
+const invalidArguments = (error: z.ZodError) =>
+  toolError(`Invalid arguments: ${error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
-
-function listToolsResult(hub: Hub, args: Record<string, unknown>): CallToolResult {
-  const { prefix } = args;
-  if (prefix !== undefined && typeof prefix !== "string") return fail('Invalid arguments: "prefix" must be a string.');
-
+function listToolsResult(hub: Hub, prefix?: string): CallToolResult {
   const tools = hub.listTools(prefix);
   if (tools.length === 0) {
     return {
@@ -67,8 +65,7 @@ export function createMcpServer(hub: Hub): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
-      LIST_TOOLS,
-      CALL_TOOL,
+      ...META_TOOLS,
       ...hub.directTools().map((t) => ({
         name: t.qualifiedName,
         ...(t.title !== undefined && { title: t.title }),
@@ -88,23 +85,22 @@ export function createMcpServer(hub: Hub): Server {
     let result: CallToolResult;
 
     if (name === "list_tools") {
-      result = listToolsResult(hub, args);
+      const parsed = ListToolsArgs.safeParse(args);
+      result = parsed.success ? listToolsResult(hub, parsed.data.prefix) : invalidArguments(parsed.error);
     } else if (name === "call_tool") {
-      const { name: innerName, arguments: innerArgs } = args;
-      if (typeof innerName !== "string" || innerName === "") {
-        result = fail('Invalid arguments: "name" is required and must be a string.');
-      } else if (innerArgs !== undefined && !isRecord(innerArgs)) {
-        result = fail('Invalid arguments: "arguments" must be an object.');
-      } else if (META_TOOL_NAMES.includes(innerName)) {
-        result = fail(`"${innerName}" is a meta-tool, call it directly.`);
+      const parsed = CallToolArgs.safeParse(args);
+      if (!parsed.success) {
+        result = invalidArguments(parsed.error);
+      } else if (META_TOOL_NAMES.includes(parsed.data.name)) {
+        result = toolError(`"${parsed.data.name}" is a meta-tool, call it directly.`);
       } else {
-        target = innerName;
-        result = await hub.callTool(innerName, innerArgs ?? {});
+        target = parsed.data.name;
+        result = await hub.callTool(target, parsed.data.arguments ?? {});
       }
     } else if (hub.directTools().some((t) => t.qualifiedName === name)) {
       result = await hub.callTool(name, args);
     } else {
-      result = fail(`Unknown tool: "${name}". Use list_tools to discover available tools.`);
+      result = unknownTool(name);
     }
 
     const client = extra.authInfo?.clientId ?? "stdio";

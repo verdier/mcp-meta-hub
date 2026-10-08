@@ -7,10 +7,13 @@ export const META_TOOL_NAMES = ["list_tools", "call_tool"];
 
 const log = (msg: string) => console.error(`[mcp-meta-hub] ${msg}`);
 
-const errorResult = (text: string): CallToolResult => ({
+export const toolError = (text: string): CallToolResult => ({
   content: [{ type: "text", text }],
   isError: true,
 });
+
+export const unknownTool = (name: string): CallToolResult =>
+  toolError(`Unknown tool: "${name}". Use list_tools to discover available tools.`);
 
 export class Hub {
   private servers: Map<string, ConnectedServer> = new Map();
@@ -108,12 +111,12 @@ export class Hub {
   async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
     const entry = this.catalog.get(name);
     if (!entry) {
-      return errorResult(`Unknown tool: "${name}". Use list_tools to discover available tools.`);
+      return unknownTool(name);
     }
 
     const server = this.servers.get(entry.serverName);
     if (!server) {
-      return errorResult(`Server for tool "${name}" is not connected.`);
+      return toolError(`Server for tool "${name}" is not connected.`);
     }
 
     try {
@@ -123,7 +126,7 @@ export class Hub {
       });
       return result as CallToolResult;
     } catch (err) {
-      return errorResult(`Tool "${name}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      return toolError(`Tool "${name}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
