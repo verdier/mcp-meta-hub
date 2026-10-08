@@ -1,9 +1,11 @@
 import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InvalidClientError, InvalidGrantError, UnauthorizedClientError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { FlowRefusedError, type AuthorizationBroker, type Flow } from "./broker.js";
 import { HubError, OAuthTimeoutError } from "./errors.js";
+import { operation, type Operation } from "./operation.js";
 import { createNetworkPolicy, type NetworkPolicy } from "./network.js";
 import { HubOAuthProvider } from "./provider.js";
 import type { CredentialStore } from "./store.js";
@@ -47,6 +49,7 @@ export function isAuthError(error: unknown): boolean {
  */
 export function describeError(error: unknown): string {
   if (error instanceof HubError) return error.message;
+  if (error instanceof McpError) return `McpError (code ${error.code})`;
   if (error instanceof StreamableHTTPError) return `${error.name} (HTTP ${error.code})`;
   return error instanceof Error ? error.name : "error";
 }
@@ -65,7 +68,6 @@ export class OAuthChild {
   readonly network: NetworkPolicy;
   private readonly endpoint: URL;
   private tail: Promise<void> = Promise.resolve();
-  private active?: AbortController;
 
   constructor(
     readonly name: string,
@@ -93,33 +95,45 @@ export class OAuthChild {
     return this.runtime.store.prepare(this.name, this.endpoint.toString());
   }
 
-  /** The guarded fetch of this child's traffic, aborted with the queue item that is running. */
+  /**
+   * The guarded fetch of this child's traffic. It carries the signal of the queue
+   * item it was started under, for as long as anything that item started runs.
+   * The optional standalone GET stream of the MCP endpoint is declined (405, "no
+   * stream"): its reconnections would authenticate outside the queue.
+   */
   readonly fetch: FetchLike = (url, init) => {
-    const signal = this.active?.signal;
-    if (!signal) return this.network.fetch(url, init);
-    return this.network.fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+    if ((init?.method ?? "GET").toUpperCase() === "GET" && new URL(url.toString()).href === this.endpoint.href) {
+      return Promise.resolve(new Response(null, { status: 405, headers: { Allow: "POST" } }));
+    }
+    const current = operation.getStore();
+    if (!current) return this.network.fetch(url, init);
+    const signal = current.controller.signal;
+    const request = this.network.fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+    const settled = request.then(() => undefined, () => undefined).finally(() => current.pending.delete(settled));
+    current.pending.add(settled);
+    return request;
   };
 
   /**
    * Run `work` once everything queued before it has settled. Rejects with a
-   * timeout after `timeoutMs` of running, aborting the requests of `work`.
+   * timeout after `timeoutMs` of running, aborting the requests of `work` and of
+   * whatever it detached; the queue moves on when `work` and those requests are done.
    */
   run<T>(work: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.tail = this.tail.then(async () => {
-        const controller = new AbortController();
-        this.active = controller;
+        const current: Operation = { controller: new AbortController(), pending: new Set() };
         const timer = setTimeout(() => {
-          controller.abort();
+          current.controller.abort();
           reject(new OAuthTimeoutError());
         }, timeoutMs);
         try {
-          resolve(await work(controller.signal));
+          resolve(await operation.run(current, () => work(current.controller.signal)));
         } catch (error) {
           reject(error);
         } finally {
           clearTimeout(timer);
-          if (this.active === controller) this.active = undefined;
+          while (current.pending.size > 0) await Promise.all(current.pending);
         }
       });
     });

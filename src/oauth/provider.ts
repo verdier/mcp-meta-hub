@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { assertNotCancelled } from "./operation.js";
 import { HubError } from "./errors.js";
 import type { AuthorizationBroker } from "./broker.js";
 import type { CredentialRecord, CredentialStore } from "./store.js";
@@ -18,7 +19,8 @@ export interface ProviderOptions {
  * to the broker; otherwise (a background refresh) it leaves no trace, so a failed
  * refresh cannot cancel an authorization a human has started. The PKCE verifier
  * belongs to the flow (kept by the broker under its state); the one the SDK reads
- * during a code exchange is set by the caller for that exchange only.
+ * during a code exchange is set by the caller for that exchange only. Nothing is
+ * persisted on behalf of a cancelled queue item.
  */
 export class HubOAuthProvider implements OAuthClientProvider {
   /** Set by the child, inside its queue, while it runs an explicit "connect". */
@@ -68,6 +70,7 @@ export class HubOAuthProvider implements OAuthClientProvider {
   /** A response without a refresh token keeps the previous one. */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     await this.store.update(this.key, (current) => {
+      assertNotCancelled();
       const record = prepared(current);
       const previous = record.tokens?.refresh_token;
       return { ...record, tokens: tokens.refresh_token === undefined && previous !== undefined ? { ...tokens, refresh_token: previous } : tokens };
@@ -115,6 +118,7 @@ export class HubOAuthProvider implements OAuthClientProvider {
   async invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): Promise<void> {
     if (scope === "verifier") return;
     await this.store.update(this.key, (current) => {
+      assertNotCancelled();
       const next = { ...prepared(current) };
       if (scope === "all" || scope === "client") delete next.clientInformation;
       if (scope === "all" || scope === "tokens") delete next.tokens;
@@ -124,7 +128,10 @@ export class HubOAuthProvider implements OAuthClientProvider {
   }
 
   private async merge(patch: Partial<Omit<CredentialRecord, "endpoint">>): Promise<void> {
-    await this.store.update(this.key, (current) => ({ ...prepared(current), ...patch }));
+    await this.store.update(this.key, (current) => {
+      assertNotCancelled();
+      return { ...prepared(current), ...patch };
+    });
   }
 }
 

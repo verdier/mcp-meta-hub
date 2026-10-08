@@ -188,6 +188,48 @@ async function run() {
       assert.ok(!logs.some((l) => l.includes(secret)), logs.join("\n"));
       assert.strictEqual((await authorize()).status, 200);
     });
+
+    await test("a reflected MCP error message never reaches the model; its class and code do", async () => {
+      const secret = "reflected-sentinel-secret";
+      fake.behaviour.echoErrorMessage = secret;
+      const result = await call();
+      fake.behaviour.echoErrorMessage = undefined;
+      assert.ok(result.isError);
+      assert.ok(!text(result).includes(secret), text(result));
+      assert.ok(text(result).includes("-32603"), text(result));
+    });
+
+    await test("the optional GET stream is never opened, so nothing authenticates outside the queue", async () => {
+      assert.ok(fake.counts.mcp > 0);
+      assert.strictEqual(fake.counts.mcpGet, 0, "no GET ever reached the MCP endpoint");
+      const refreshes = fake.counts.refreshGrant;
+      fake.expireAccessTokens();
+      assert.ok(!(await call()).isError);
+      assert.strictEqual(fake.counts.refreshGrant, refreshes + 1);
+    });
+
+    await test("a connect that times out in discovery cannot register or write afterwards", async () => {
+      const slowFake = new FakeOAuthServer();
+      await slowFake.start();
+      slowFake.behaviour.prmDelayMs = 500;
+      const dir = await mkdtemp(join(tmpdir(), "mcp-hub-oauth-late-"));
+      const lateHub = new Hub({ connectTimeoutMs: 100 });
+      try {
+        await lateHub.start({
+          servers: { late: { transport: "streamable-http", url: `${slowFake.origin}/mcp`, oauth: { allowPrivateNetwork: true } } },
+          oauth: { redirectUrl: `${hubOrigin}/oauth/callback`, storeDir: dir },
+        });
+        assert.strictEqual(lateHub.servers()[0]!.status, "failed");
+        await sleep(1_000);
+        assert.strictEqual(slowFake.counts.register, 0, "no registration after the timeout");
+        const record = JSON.parse(await readFile(join(dir, STORE_FILE), "utf8")).credentials.late;
+        assert.deepStrictEqual(Object.keys(record), ["endpoint"], "nothing was written");
+      } finally {
+        await lateHub.stop();
+        await slowFake.stop();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   } finally {
     console.error = realError;
     http.closeAllConnections();

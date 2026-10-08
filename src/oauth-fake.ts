@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 export interface FakeBehaviour {
   rotate: boolean;
@@ -39,6 +39,10 @@ export interface FakeBehaviour {
   /** The protected-resource metadata lives only at the URL the 401 challenge names, plus its scope. */
   challengeOnlyMetadata?: boolean;
   challengeScope?: string;
+  /** Protected-resource metadata answers after this long. */
+  prmDelayMs?: number;
+  /** `tools/call` of `echo` fails with this JSON-RPC error message. */
+  echoErrorMessage?: string;
 }
 
 export function freePort(): Promise<number> {
@@ -58,7 +62,7 @@ const random = () => b64url(randomBytes(24));
 export class FakeOAuthServer {
   origin = "";
   behaviour: FakeBehaviour = { rotate: true, omitRefreshToken: false, always401: false, tokenDelayMs: 0, tools: ["echo", "slow", "list_cities"] };
-  readonly counts = { register: 0, authorize: 0, codeGrant: 0, refreshGrant: 0, mcp: 0, challengeMetadata: 0, wellKnownMetadata: 0 };
+  readonly counts = { register: 0, authorize: 0, codeGrant: 0, refreshGrant: 0, mcp: 0, mcpGet: 0, challengeMetadata: 0, wellKnownMetadata: 0 };
   readonly clients = new Map<string, { redirect_uris: string[] }>();
   readonly authorizeRequests: URLSearchParams[] = [];
   private codes = new Map<string, { clientId: string; redirectUri: string; challenge: string }>();
@@ -123,6 +127,7 @@ export class FakeOAuthServer {
     }
     if (path.startsWith("/.well-known/oauth-protected-resource")) {
       this.counts.wellKnownMetadata++;
+      await new Promise((r) => setTimeout(r, this.behaviour.prmDelayMs ?? 0));
       if (this.behaviour.challengeOnlyMetadata) return this.json(res, 404, {});
       return this.json(res, 200, { resource: `${this.origin}/mcp`, authorization_servers: [this.origin] });
     }
@@ -209,6 +214,7 @@ export class FakeOAuthServer {
     }
     if (path === "/mcp") {
       this.counts.mcp++;
+      if (req.method === "GET") this.counts.mcpGet++;
       const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
       const body = req.method === "POST" ? JSON.parse(await this.body(req) || "null") : undefined;
       const tool = body?.method === "tools/call" ? (body.params?.name as string) : undefined;
@@ -246,6 +252,7 @@ export class FakeOAuthServer {
       tools: tools.map((name) => ({ name, description: `fake ${name}`, inputSchema: { type: "object" as const } })),
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      if (request.params.name === "echo" && this.behaviour.echoErrorMessage) throw new McpError(ErrorCode.InternalError, this.behaviour.echoErrorMessage);
       if (request.params.name === "slow") await new Promise((r) => setTimeout(r, 500));
       return { content: [{ type: "text", text: JSON.stringify({ tool: request.params.name, args: request.params.arguments ?? {} }) }] };
     });

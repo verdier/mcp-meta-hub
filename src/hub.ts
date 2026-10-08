@@ -1,4 +1,4 @@
-import { McpError, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Config, CatalogEntry, CallToolResult, ServerConfig } from "./types.js";
 import { resolve } from "node:path";
 import { connectServer, type ConnectedServer } from "./transports.js";
@@ -320,8 +320,8 @@ export class Hub {
         slot.status = "needs-auth";
         return this.needsAuthorization(entry.serverName);
       }
-      // An OAuth child's errors may carry a response body: protocol errors keep their message, the rest only their class.
-      const detail = slot.oauth && !(err instanceof McpError) ? describeError(err) : err instanceof Error ? err.message : String(err);
+      // An OAuth child's errors may carry a response body or reflect anything a server chose: only their class and code are shown.
+      const detail = slot.oauth ? describeError(err) : err instanceof Error ? err.message : String(err);
       return toolError(`Tool "${name}" failed: ${detail}`);
     } finally {
       if (--live.inFlight === 0) live.drained?.();
