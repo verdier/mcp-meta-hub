@@ -167,6 +167,71 @@ This prevents name collisions and makes prefix-based discovery natural.
 }
 ```
 
+### Child environment (stdio servers)
+
+A stdio child receives the hub's environment **minus every variable whose name matches `/KEY|TOKEN|SECRET|PASSWORD/i`**, plus the `env` declared for it. A declared value of the form `"$NAME"` is read from the hub's full environment, so a child that needs a secret must declare it:
+
+```json
+{
+  "servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "$GITHUB_TOKEN" }
+    }
+  }
+}
+```
+
+> **Breaking change in 0.2.0:** before, children inherited the whole hub environment. Children that relied on inherited secrets (`*_API_KEY`, `*_TOKEN`, ...) must now declare them in `env`.
+
+### Always-listed tools (`always`)
+
+By default an agent only sees `list_tools` and `call_tool`. For the few tools it uses constantly, `always` lists them directly in `tools/list`, under the same qualified name `call_tool` uses, with their original `inputSchema`, `outputSchema` and `annotations`. They stay callable through `call_tool` too.
+
+```json
+{
+  "servers": {
+    "weather": {
+      "command": "node",
+      "args": ["./skills/weather/dist/index.js"],
+      "always": ["list_cities"]
+    },
+    "notes": { "command": "node", "args": ["./notes.js"], "always": true }
+  }
+}
+```
+
+`always: true` lists every tool of the server; an array selects tools by their **original** name (an unknown name logs a warning). If two tools end up with the same effective name, or one collides with `list_tools` / `call_tool`, the later tool is skipped with an error in the log.
+
+## HTTP Mode
+
+```bash
+MCP_HUB_TOKEN_APP=... mcp-meta-hub ./mcp-hub.json --http 127.0.0.1:4120
+```
+
+Without `--http` the hub speaks stdio, as before. With it, the hub serves Streamable HTTP on `/mcp`:
+
+- **Stateless**: no MCP session. Each POST gets a fresh server, so a client survives a hub restart. GET and DELETE answer `405`.
+- **Loopback only**: the hub refuses to start on a non-loopback host, and rejects foreign `Host` headers (DNS rebinding protection).
+- **Bearer auth**: each client has its own token, read from an environment variable at startup. `clients` is required and non-empty in HTTP mode; a missing, empty or duplicated token stops the hub from starting.
+
+```json
+{
+  "servers": { "weather": { "command": "node", "args": ["./weather.js"] } },
+  "clients": {
+    "app": { "tokenEnv": "MCP_HUB_TOKEN_APP" },
+    "ci": { "tokenEnv": "MCP_HUB_TOKEN_CI" }
+  }
+}
+```
+
+A request without a valid `Authorization: Bearer <token>` gets `401` before anything is dispatched. Every tool call is logged on stderr with the client name, the tool, the outcome and the duration; headers and tokens are never logged.
+
+On `SIGTERM`/`SIGINT` the hub stops accepting connections, stops its children, and exits (after 5 seconds at most).
+
+All clients share the same children, started once.
+
 ## Skills
 
 A **skill** is a SKILL.md file that tells the AI agent what tools are available and when to use them.
