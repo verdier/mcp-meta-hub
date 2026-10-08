@@ -38,10 +38,11 @@
     "url": "git+https://github.com/verdier/mcp-meta-hub.git"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "undici": "^7.29.1",
     "zod": "^3.24.0"
   },
   "devDependencies": {
