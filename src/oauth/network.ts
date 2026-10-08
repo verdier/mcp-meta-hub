@@ -145,7 +145,6 @@ export function pureOrigin(value: string): string | undefined {
   }
 }
 
-/** Shape is checked per request, so a bad endpoint fails its child instead of the hub. */
 function approvedOrigin(value: string): string {
   const origin = pureOrigin(value);
   if (!origin) throw new HubError(`Approved URL is not an origin: ${value}`);
@@ -159,7 +158,6 @@ function assertUrlShape(url: URL): void {
   if (url.hash) throw new HubError("Network policy rejected a fragment in the URL");
 }
 
-/** True for a globally routable unicast address; throws on anything that is not an IP address. */
 export function isPublicAddress(address: string): boolean {
   const version = isIP(address);
   if (version === 4) return !isUnsafeIpv4(address);

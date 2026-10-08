@@ -29,7 +29,6 @@ export interface ServerSummary {
   oauth: boolean;
 }
 
-/** One connected generation of a server's client, with its calls in flight. */
 interface Live {
   server: ConnectedServer;
   generation: number;
@@ -44,7 +43,6 @@ interface Slot {
   generation: number;
   live?: Live;
   oauth?: OAuthChild;
-  /** The OAuth setup of this child failed: it stays `failed`, the others are unaffected. */
   broken?: boolean;
 }
 
@@ -59,7 +57,6 @@ export interface HubOptions {
 export class Hub {
   private slots: Map<string, Slot> = new Map();
   private catalog: Map<string, CatalogEntry> = new Map();
-  /** Set when the config has an `oauth` section. */
   oauth?: OAuthRuntime;
 
   constructor(private readonly options: HubOptions = {}) {}
@@ -112,7 +109,6 @@ export class Hub {
       .catch((err) => this.failure(name, slot, generation, err));
   }
 
-  /** Open the server and list its tools, resolving to the installer; never throws. */
   private async attempt(name: string, slot: Slot, generation: number, signal?: AbortSignal): Promise<() => void> {
     try {
       const { server, tools } = await this.open(name, slot, signal);
@@ -148,10 +144,7 @@ export class Hub {
     };
   }
 
-  /**
-   * An explicit "connect" of an OAuth child: a fresh authorization, started inside
-   * the child's queue. Resolves to the URL to send the browser to.
-   */
+  /** A fresh authorization of an OAuth child; resolves to the URL to send the browser to. */
   startAuthorization(name: string): Promise<string> {
     const slot = this.slots.get(name)!;
     const child = slot.oauth!;
@@ -162,9 +155,8 @@ export class Hub {
   }
 
   /**
-   * The callback of an authorization: take the flow of `state`, exchange `code`
-   * and reconnect the child, as one item of its queue. Resolves to the child's
-   * new status, or undefined if the provider denied the authorization.
+   * The callback of an authorization, as one queue item: consume the flow, exchange
+   * the code, reconnect. Resolves to the new status, undefined if the provider denied it.
    */
   async completeAuthorization(name: string, state: string, code: string | undefined): Promise<ServerStatus | undefined> {
     const slot = this.slots.get(name)!;

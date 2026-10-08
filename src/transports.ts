@@ -64,7 +64,6 @@ export function childEnv(
   return { ...env, ...(declared ? resolveEnvRefs(declared, base) : {}) };
 }
 
-/** An OAuth child: the SDK transport authenticates through `authProvider`, over `fetch`. */
 export interface OAuthTransport {
   authProvider: OAuthClientProvider;
   fetch: FetchLike;

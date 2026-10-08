@@ -9,7 +9,6 @@ import { HubError } from "./errors.js";
  */
 export interface Operation {
   controller: AbortController;
-  /** Requests started on behalf of the item that have not settled yet. */
   pending: Set<Promise<unknown>>;
 }
 

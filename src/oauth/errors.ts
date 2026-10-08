@@ -10,7 +10,6 @@ export class HubError extends Error {
   }
 }
 
-/** An item of an OAuth child's queue ran past its time (its requests were aborted). */
 export class OAuthTimeoutError extends HubError {
   constructor() {
     super("timed out");

@@ -3,6 +3,7 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 import { InvalidClientError, InvalidGrantError, UnauthorizedClientError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { ChildOAuthOptions } from "../config.js";
 import { FlowRefusedError, type AuthorizationBroker, type Flow } from "./broker.js";
 import { HubError, OAuthTimeoutError } from "./errors.js";
 import { operation, type Operation } from "./operation.js";
@@ -19,14 +20,6 @@ export interface OAuthRuntime {
   redirectUrl: URL;
   /** The status page, named in every "needs authorization" message. */
   pageUrl: string;
-}
-
-export interface OAuthChildOptions {
-  scopes?: string[];
-  clientId?: string;
-  clientName?: string;
-  allowedOrigins?: string[];
-  allowPrivateNetwork?: boolean;
 }
 
 /**
@@ -55,13 +48,10 @@ export function describeError(error: unknown): string {
 }
 
 /**
- * The OAuth side of one HTTP child. The SDK transport does the protocol
- * (401, `WWW-Authenticate`, refresh, step-up) through the provider; this class
- * only guarantees that nothing happens in parallel on one child: every
- * operation (a request, a connect, an explicit authorization start, a code
- * exchange) is an item of one serial queue. An item leaves the queue when its
- * work has really settled; its timeout aborts the requests it is making, and a
- * caller may be told about the timeout earlier, never the queue.
+ * The OAuth side of one HTTP child. The SDK transport does the protocol; this
+ * class guarantees nothing runs in parallel on one child: every operation is an
+ * item of one serial queue, which advances only when the item's work has really
+ * settled (a caller may be told about a timeout earlier, never the queue).
  */
 export class OAuthChild {
   readonly provider: HubOAuthProvider;
@@ -72,7 +62,7 @@ export class OAuthChild {
   constructor(
     readonly name: string,
     url: string,
-    private readonly options: OAuthChildOptions,
+    private readonly options: ChildOAuthOptions,
     private readonly runtime: OAuthRuntime,
   ) {
     this.endpoint = new URL(url);
@@ -90,7 +80,6 @@ export class OAuthChild {
     );
   }
 
-  /** Bind the stored record to this endpoint (a changed endpoint drops it). */
   prepare(): Promise<void> {
     return this.runtime.store.prepare(this.name, this.endpoint.toString());
   }
@@ -140,10 +129,9 @@ export class OAuthChild {
   }
 
   /**
-   * Run `work` (inside the queue) as an explicit "connect": the stored tokens and
-   * discovery are dropped, and so is the client registration unless it carries
-   * the current redirect URL, so the SDK starts a fresh authorization and the
-   * provider publishes its URL. Resolves to that URL.
+   * Inside the queue: drop tokens and discovery (and the client registration unless
+   * it carries the current redirect URL), run `work` so the SDK starts a fresh
+   * authorization, and resolve to the URL the provider published.
    */
   async startAuthorization(work: () => Promise<unknown>): Promise<string> {
     const info = (await this.provider.clientInformation()) as { redirect_uris?: string[] } | undefined;
@@ -165,7 +153,7 @@ export class OAuthChild {
     return url;
   }
 
-  /** Take the flow of a callback state (or refuse it) and exchange its code, with that flow's verifier. */
+  /** Inside the queue: consume the flow of `state` and exchange `code` with that flow's own verifier. */
   async completeAuthorization(state: string, code: string | undefined): Promise<boolean> {
     const flow: Flow = this.runtime.broker.consume(state);
     if (flow.key !== this.name) throw new FlowRefusedError("invalid");

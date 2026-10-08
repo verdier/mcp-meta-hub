@@ -39,7 +39,6 @@ function hostname(req: IncomingMessage): string | undefined {
   return HOST.exec(req.headers.host ?? "")?.[1]?.toLowerCase();
 }
 
-/** The callback's `state` and `code` or `error`, or undefined if anything else is off. */
 function callbackParams(search: URLSearchParams): { state: string; code?: string; error?: string } | undefined {
   const keys = Array.from(search.keys());
   if (new Set(keys).size !== keys.length) return undefined;
@@ -54,10 +53,8 @@ function callbackParams(search: URLSearchParams): { state: string; code?: string
 }
 
 /**
- * The browser surface of the HTTP listener: status page, "connect" and OAuth
- * callback. Dispatched by exact path before the bearer gate, with its own Host
- * allowlist (the redirect URL's host and loopback). Returns false for any other
- * path, which then goes through the gate like before.
+ * Status page, "connect" and OAuth callback: dispatched by exact path before the
+ * bearer gate, with their own Host allowlist. Returns false for any other path.
  */
 export function createBrowserSurface(hub: Hub, oauth: OAuthRuntime) {
   const allowedHosts = new Set([...LOOPBACK, oauth.redirectUrl.hostname.toLowerCase()]);
@@ -98,7 +95,6 @@ export function createBrowserSurface(hub: Hub, oauth: OAuthRuntime) {
       message(res, 400, "Authorization failed", "The callback is invalid, expired or already used.");
       return;
     }
-    // The state is consumed inside the child's queue, with the code exchange and the reconnect: one transaction.
     let status;
     try {
       status = await hub.completeAuthorization(name, params.state, params.error === undefined ? params.code : undefined);

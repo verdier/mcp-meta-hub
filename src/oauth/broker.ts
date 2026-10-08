@@ -1,7 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 const STATE_TTL_MS = 10 * 60_000;
-/** Superseded states remembered only to refuse them cleanly. */
 const MAX_SUPERSEDED = 32;
 
 interface Pending {
@@ -13,7 +12,6 @@ interface Pending {
   authorizationUrl?: string;
 }
 
-/** An authorization flow taken out of the broker by its callback. */
 export interface Flow {
   key: string;
   verifier: string;
@@ -60,7 +58,6 @@ export class AuthorizationBroker {
     return pending && pending.expiresAt > this.now() ? pending.authorizationUrl : undefined;
   }
 
-  /** The server a callback state belongs to (live or superseded), without consuming it. */
   serverOf(state: string): string | undefined {
     for (const pending of this.pending.values()) if (equal(pending.state, state)) return pending.key;
     for (const [old, entry] of this.superseded) if (equal(old, state)) return entry.key;
