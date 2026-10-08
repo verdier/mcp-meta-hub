@@ -15,7 +15,6 @@ import type { OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.
 
 /** What survives a restart for one server. The PKCE verifier and the authorization state never do. */
 export interface CredentialRecord {
-  /** Normalized endpoint the record is bound to: a different endpoint starts from scratch. */
   endpoint: string;
   clientInformation?: OAuthClientInformationMixed;
   tokens?: OAuthTokens;
@@ -40,9 +39,8 @@ export const STORE_FILE = "credentials.json";
 
 /**
  * Plaintext credentials of every OAuth child in one JSON file: directory 0700,
- * file 0600, written atomically (temp file, fsync, rename), every
- * read-modify-write serialized. One hub process per store, so the parsed file is
- * cached in memory: the file is read once, and replaced by every write.
+ * file 0600, atomic writes, serialized read-modify-write. One hub process per
+ * store, so the parsed file is cached; a changed endpoint drops its record.
  */
 export class CredentialStore {
   readonly filePath: string;
@@ -55,7 +53,6 @@ export class CredentialStore {
     this.isSafeFile();
   }
 
-  /** Bind `key` to `endpoint`; a record bound to another endpoint is dropped. */
   prepare(key: string, endpoint: string): Promise<void> {
     return this.update(key, (current) => (current?.endpoint === endpoint ? current : { endpoint }));
   }
@@ -93,6 +90,9 @@ export class CredentialStore {
   }
 
   private write(records: Record<string, CredentialRecord>): void {
+    // The cache spares reads, never these checks: a path swapped for a symlink since the last write is refused.
+    this.ensureDirectory();
+    this.isSafeFile();
     const temp = join(this.dir, `.${STORE_FILE}.${randomBytes(12).toString("hex")}.tmp`);
     let fd: number | undefined;
     try {

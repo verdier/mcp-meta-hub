@@ -122,6 +122,26 @@ async function run() {
     });
   });
 
+  await test("store: a file or directory swapped for a symlink after the first write is refused at the next write", async () => {
+    await withDir(async (dir) => {
+      const store = new CredentialStore(dir);
+      await store.prepare("a", endpoint);
+      const elsewhere = join(dir, "..", "elsewhere");
+      await writeFile(elsewhere, "{}");
+      await rm(join(dir, STORE_FILE));
+      await symlink(elsewhere, join(dir, STORE_FILE));
+      await assert.rejects(store.update("a", (r) => ({ ...r!, clientInformation: { client_id: "x" } })), /unsafe/);
+      assert.strictEqual(await readFile(elsewhere, "utf8"), "{}", "nothing was written through the link");
+      await rm(join(dir, STORE_FILE));
+      await writeFile(join(dir, STORE_FILE), "");
+      await rm(dir, { recursive: true });
+      await mkdir(join(dir, "..", "target"));
+      await symlink(join(dir, "..", "target"), dir);
+      await assert.rejects(store.update("a", (r) => ({ ...r!, clientInformation: { client_id: "x" } })), /unsafe/);
+      assert.deepStrictEqual(await readdir(join(dir, "..", "target")), [], "no credential file landed in the target");
+    });
+  });
+
   await test("store: concurrent updates of different fields and servers are all kept", async () => {
     await withDir(async (dir) => {
       const store = new CredentialStore(dir);
