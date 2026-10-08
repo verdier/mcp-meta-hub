@@ -19,7 +19,7 @@
     "dev": "tsup --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsup src/index.ts src/e2e.test.ts src/config.test.ts src/resilience.test.ts src/features.test.ts src/http.test.ts src/lifecycle.test.ts src/oauth.test.ts --format esm --clean --sourcemap --target node20 --no-dts && (rc=0; for t in config features e2e resilience http lifecycle oauth; do node dist/$t.test.js || rc=1; done; exit $rc)",
+    "test": "tsup src/index.ts src/e2e.test.ts src/config.test.ts src/resilience.test.ts src/features.test.ts src/http.test.ts src/lifecycle.test.ts src/oauth.test.ts src/oauth-e2e.test.ts --format esm --clean --sourcemap --target node20 --no-dts && (rc=0; for t in config features e2e resilience http lifecycle oauth oauth-e2e; do node dist/$t.test.js || rc=1; done; exit $rc)",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
