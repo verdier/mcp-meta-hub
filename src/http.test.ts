@@ -146,6 +146,13 @@ async function run() {
       assert.strictEqual(res.status, 401);
     });
 
+    await test("every method needs the bearer, not only POST", async () => {
+      for (const method of ["GET", "DELETE", "PUT", "OPTIONS"]) {
+        const res = await fetch(url, { method });
+        assert.strictEqual(res.status, 401, method);
+      }
+    });
+
     await test("GET and DELETE answer 405 once authenticated", async () => {
       for (const method of ["GET", "DELETE"]) {
         const res = await fetch(url, { method, headers: { Authorization: `Bearer ${TOKEN_A}` } });
