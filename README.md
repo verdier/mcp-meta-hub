@@ -207,13 +207,13 @@ By default an agent only sees `list_tools` and `call_tool`. For the few tools it
 ## HTTP Mode
 
 ```bash
-MCP_HUB_TOKEN_APP=... mcp-meta-hub ./mcp-hub.json --http 127.0.0.1:4120
+MCP_HUB_TOKEN_APP=... mcp-meta-hub ./mcp-hub.json --http 127.0.0.1:8080
 ```
 
 Without `--http` the hub speaks stdio, as before. With it, the hub serves Streamable HTTP on `/mcp`:
 
 - **Stateless**: no MCP session. Each POST gets a fresh server, so a client survives a hub restart. GET and DELETE answer `405`.
-- **Loopback only**: the hub refuses to start on a non-loopback host, and rejects foreign `Host` headers (DNS rebinding protection).
+- **Loopback only**: `--http` accepts exactly `127.0.0.1`, `localhost` or `::1` (lowercase) and refuses anything else. For these hosts the hub rejects requests whose `Host` header is not loopback (DNS rebinding protection).
 - **Bearer auth**: each client has its own token, read from an environment variable at startup. `clients` is required and non-empty in HTTP mode; a missing, empty or duplicated token stops the hub from starting.
 
 ```json
@@ -376,7 +376,7 @@ Use `$VAR` in server env values to reference variables from the parent process e
 }
 ```
 
-The hub resolves `$ACCT_A_PASSWORD` from `process.env` at startup. If a referenced variable is not found, a warning is logged and the literal `$VAR` string is kept. Servers also inherit all parent environment variables automatically (unlike the MCP SDK default which only inherits `HOME`, `PATH`, etc.).
+The hub resolves `$ACCT_A_PASSWORD` from `process.env` at startup. If a referenced variable is not found, a warning is logged and the literal `$VAR` string is kept. Stdio servers also inherit the hub's environment, except variables whose name matches `/KEY|TOKEN|SECRET|PASSWORD/i` (see [Child environment](#child-environment-stdio-servers)); declare the secrets a child needs in its `env`.
 
 ### Tool Prefix
 
