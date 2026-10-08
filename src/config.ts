@@ -2,11 +2,15 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+/** `true` exposes every tool of the server directly; an array selects tools by original name. */
+const AlwaysSchema = z.union([z.boolean(), z.array(z.string())]).optional();
+
 const StdioServerSchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional().default([]),
   env: z.record(z.string()).optional(),
   prefix: z.union([z.boolean(), z.string()]).optional(),
+  always: AlwaysSchema,
 });
 
 const SseServerSchema = z.object({
@@ -14,6 +18,7 @@ const SseServerSchema = z.object({
   transport: z.literal("sse"),
   headers: z.record(z.string()).optional(),
   prefix: z.union([z.boolean(), z.string()]).optional(),
+  always: AlwaysSchema,
 });
 
 const StreamableHttpServerSchema = z.object({
@@ -21,6 +26,7 @@ const StreamableHttpServerSchema = z.object({
   transport: z.literal("streamable-http").optional(),
   headers: z.record(z.string()).optional(),
   prefix: z.union([z.boolean(), z.string()]).optional(),
+  always: AlwaysSchema,
 });
 
 export const ServerConfigSchema = z.discriminatedUnion("transport", [
@@ -33,8 +39,15 @@ const ServerNameSchema = z.string().regex(
   "Server names must be alphanumeric with optional hyphens (no underscores, no leading/trailing hyphens)",
 );
 
+const ClientSchema = z.object({
+  /** Name of the environment variable holding this client's bearer token. */
+  tokenEnv: z.string().min(1),
+});
+
 export const ConfigSchema = z.object({
   servers: z.record(ServerNameSchema, ServerConfigSchema),
+  /** HTTP mode only: one bearer token per named client. */
+  clients: z.record(z.string().min(1), ClientSchema).optional(),
 });
 
 export async function loadConfig(configPath: string): Promise<z.infer<typeof ConfigSchema>> {

@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 .DS_Store
 mcp-hub.json
+test/*.generated.config.json

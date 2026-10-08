@@ -4,6 +4,8 @@ import type { ConfigSchema, ServerConfigSchema } from "./config.js";
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
+export const VERSION = "0.2.0";
+
 export interface CatalogEntry {
   /** Fully qualified name: `{serverName}__{toolName}` */
   qualifiedName: string;
@@ -15,6 +17,12 @@ export interface CatalogEntry {
   description: string;
   /** JSON Schema for the tool's input parameters */
   inputSchema: Record<string, unknown>;
+  /** Tool title, if the upstream server declares one */
+  title?: string;
+  outputSchema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  /** Listed directly in `tools/list` (config `always`) */
+  always: boolean;
 }
 
 export interface CallToolResult {

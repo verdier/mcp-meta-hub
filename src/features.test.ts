@@ -2,7 +2,9 @@
  * Unit tests for $VAR env interpolation and prefix config.
  */
 import { strict as assert } from "node:assert";
-import { resolveEnvRefs } from "./transports.js";
+import { readFileSync } from "node:fs";
+import { resolveEnvRefs, childEnv } from "./transports.js";
+import { VERSION } from "./types.js";
 import { Hub } from "./hub.js";
 
 async function run() {
@@ -85,6 +87,107 @@ async function run() {
     await hub.start({ servers: {} });
     await hub.stop();
     assert.ok(true);
+  });
+
+  // ── catalog: always, collisions ─────────────────────────────────────
+
+  console.log("\ncatalog tests\n");
+
+  const tool = (name: string, schema: Record<string, unknown> = { type: "object" }) =>
+    ({ name, description: `${name} desc`, inputSchema: schema }) as never;
+  const names = (hub: Hub) => hub.directTools().map((t) => t.qualifiedName).sort();
+
+  await test("always: true lists every tool of the server directly", () => {
+    const hub = new Hub();
+    hub.addTools("srv", { always: true }, [tool("a"), tool("b")]);
+    assert.deepStrictEqual(names(hub), ["srv__a", "srv__b"]);
+  });
+
+  await test("always: [names] selects by original name and uses the effective name", () => {
+    const hub = new Hub();
+    hub.addTools("srv", { always: ["b"], prefix: "x_" }, [tool("a"), tool("b")]);
+    assert.deepStrictEqual(names(hub), ["x_b"]);
+    assert.strictEqual(hub.listTools().length, 2);
+  });
+
+  await test("no always: nothing listed directly", () => {
+    const hub = new Hub();
+    hub.addTools("srv", {}, [tool("a")]);
+    assert.deepStrictEqual(names(hub), []);
+  });
+
+  await test("unknown always name warns without failing", () => {
+    const hub = new Hub();
+    const warnings: string[] = [];
+    const orig = console.error;
+    console.error = (m: string) => warnings.push(String(m));
+    try {
+      hub.addTools("srv", { always: ["ghost"] }, [tool("a")]);
+    } finally {
+      console.error = orig;
+    }
+    assert.ok(warnings.some((w) => w.includes("ghost")));
+    assert.strictEqual(hub.listTools().length, 1);
+  });
+
+  await test("direct tools keep outputSchema and annotations", () => {
+    const hub = new Hub();
+    hub.addTools("srv", { always: true }, [
+      { name: "a", inputSchema: { type: "object" }, outputSchema: { type: "object" }, annotations: { readOnlyHint: true } } as never,
+    ]);
+    const [entry] = hub.directTools();
+    assert.deepStrictEqual(entry.outputSchema, { type: "object" });
+    assert.deepStrictEqual(entry.annotations, { readOnlyHint: true });
+  });
+
+  await test("duplicate effective name is skipped, first one wins", () => {
+    const hub = new Hub();
+    hub.addTools("one", { prefix: false }, [tool("same")]);
+    hub.addTools("two", { prefix: false }, [tool("same")]);
+    const all = hub.listTools();
+    assert.strictEqual(all.length, 1);
+    assert.strictEqual(all[0].serverName, "one");
+  });
+
+  await test("collision with a meta-tool name is skipped", () => {
+    const hub = new Hub();
+    hub.addTools("srv", { prefix: false }, [tool("list_tools"), tool("call_tool"), tool("ok")]);
+    assert.deepStrictEqual(hub.listTools().map((t) => t.qualifiedName), ["ok"]);
+  });
+
+  await test("non-object inputSchema is not listed directly but stays callable", () => {
+    const hub = new Hub();
+    hub.addTools("srv", { always: true }, [tool("bad", { type: "string" }), tool("good")]);
+    assert.deepStrictEqual(names(hub), ["srv__good"]);
+    assert.strictEqual(hub.listTools().length, 2);
+  });
+
+  // ── child environment scrub ─────────────────────────────────────────
+
+  console.log("\nchild env tests\n");
+
+  const base = { PATH: "/bin", HOME: "/home/x", API_KEY: "k", MY_TOKEN: "t", db_password: "p", Client_Secret: "s", KEEP: "1" };
+
+  await test("secret-named variables are dropped, PATH/HOME kept", () => {
+    const env = childEnv(undefined, base);
+    assert.deepStrictEqual(env, { PATH: "/bin", HOME: "/home/x", KEEP: "1" });
+  });
+
+  await test("declared env is added and overrides", () => {
+    const env = childEnv({ KEEP: "2", EXTRA: "x" }, base);
+    assert.strictEqual(env.KEEP, "2");
+    assert.strictEqual(env.EXTRA, "x");
+  });
+
+  await test("declared $VAR re-injects a scrubbed hub variable", () => {
+    const env = childEnv({ GITHUB_TOKEN: "$MY_TOKEN" }, base);
+    assert.strictEqual(env.GITHUB_TOKEN, "t");
+    assert.strictEqual(env.MY_TOKEN, undefined);
+  });
+
+  await test("source version matches package.json", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+    assert.strictEqual(VERSION, pkg.version);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
