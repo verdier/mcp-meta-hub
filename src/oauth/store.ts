@@ -41,11 +41,13 @@ export const STORE_FILE = "credentials.json";
 /**
  * Plaintext credentials of every OAuth child in one JSON file: directory 0700,
  * file 0600, written atomically (temp file, fsync, rename), every
- * read-modify-write serialized. One hub process per store.
+ * read-modify-write serialized. One hub process per store, so the parsed file is
+ * cached in memory: the file is read once, and replaced by every write.
  */
 export class CredentialStore {
   readonly filePath: string;
   private tail: Promise<unknown> = Promise.resolve();
+  private cache?: Record<string, CredentialRecord>;
 
   constructor(private readonly dir: string) {
     this.filePath = join(dir, STORE_FILE);
@@ -59,15 +61,25 @@ export class CredentialStore {
   }
 
   load(key: string): Promise<CredentialRecord | undefined> {
-    return this.serialize(async () => this.read()[key]);
+    return this.serialize(async () => {
+      const record = this.records()[key];
+      return record && structuredClone(record);
+    });
   }
 
   update(key: string, updater: (current: CredentialRecord | undefined) => CredentialRecord): Promise<void> {
     return this.serialize(async () => {
-      const records = this.read();
+      const records = structuredClone(this.records());
       records[key] = RecordSchema.parse(updater(records[key])) as CredentialRecord;
+      this.cache = undefined;
       this.write(records);
+      this.cache = records;
     });
+  }
+
+  private records(): Record<string, CredentialRecord> {
+    this.cache ??= this.read();
+    return this.cache;
   }
 
   private read(): Record<string, CredentialRecord> {

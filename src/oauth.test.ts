@@ -106,6 +106,21 @@ async function run() {
     });
   });
 
+  await test("store: after the first read nothing touches the disk; every write replaces the cached copy", async () => {
+    await withDir(async (dir) => {
+      const store = new CredentialStore(dir);
+      await store.prepare("a", endpoint);
+      await store.update("a", (r) => ({ ...r!, tokens: { access_token: "at", refresh_token: "rt", token_type: "bearer" } }));
+      await rm(join(dir, STORE_FILE));
+      assert.strictEqual((await store.load("a"))?.tokens?.refresh_token, "rt", "served from memory");
+      const copy = await store.load("a");
+      copy!.tokens!.access_token = "tampered";
+      assert.strictEqual((await store.load("a"))?.tokens?.access_token, "at", "callers get copies");
+      await store.update("a", (r) => ({ ...r!, tokens: { access_token: "at2", token_type: "bearer" } }));
+      assert.strictEqual((await new CredentialStore(dir).load("a"))?.tokens?.access_token, "at2", "and the file follows");
+    });
+  });
+
   await test("store: concurrent updates of different fields and servers are all kept", async () => {
     await withDir(async (dir) => {
       const store = new CredentialStore(dir);
