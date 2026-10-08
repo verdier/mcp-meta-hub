@@ -21,8 +21,8 @@ const HEADERS = {
 const escapeHtml = (text: string) =>
   text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-function page(res: ServerResponse, status: number, title: string, body: string): void {
-  res.writeHead(status, { ...HEADERS, "Content-Type": "text/html; charset=utf-8" });
+function page(res: ServerResponse, status: number, title: string, body: string, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { ...HEADERS, ...headers, "Content-Type": "text/html; charset=utf-8" });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(title)}</title>`
     + "<style>body{font:15px system-ui,sans-serif;margin:2rem auto;max-width:44rem;padding:0 1rem}td,th{padding:.3rem .8rem;text-align:left}</style>"
     + `</head><body><h1>${escapeHtml(title)}</h1>${body}</body></html>`);
@@ -64,7 +64,9 @@ export function createBrowserSurface(hub: Hub, oauth: OAuthRuntime) {
       s.oauth ? `<form method="post" action="/oauth/start/${escapeHtml(s.name)}"><button>Connect</button></form>` : ""
     }</td></tr>`).join("");
     page(res, 200, "mcp-meta-hub", `<table><tr><th>Server</th><th>Transport</th><th>Status</th><th>Tools</th><th></th></tr>${rows}</table>`
-      + `<p>Connect works from ${escapeHtml(oauth.redirectUrl.origin)} only.</p>`);
+      + `<p>Connect works from ${escapeHtml(oauth.redirectUrl.origin)} only.</p>`,
+    // Under no-referrer a browser sends `Origin: null` on the form's POST and the connect check can never pass.
+    { "Referrer-Policy": "same-origin" });
   }
 
   async function start(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {

@@ -97,7 +97,8 @@ async function run() {
       }
       assert.ok(!html.includes('action="/oauth/start/weather"'));
       assert.strictEqual(r.headers.get("cache-control"), "no-store");
-      assert.strictEqual(r.headers.get("referrer-policy"), "no-referrer");
+      // A browser only sends the page's Origin on the connect POST when the policy is not no-referrer.
+      assert.strictEqual(r.headers.get("referrer-policy"), "same-origin");
       assert.strictEqual(r.headers.get("x-content-type-options"), "nosniff");
       assert.ok(r.headers.get("content-security-policy")!.includes("frame-ancestors 'none'"));
     });
