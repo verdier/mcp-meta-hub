@@ -308,6 +308,10 @@ async function run() {
       assert.strictEqual(fake.counts.authorize + fake.counts.register, before);
       assert.strictEqual(status("fake"), "connected", "a refused start does not touch the grant");
     });
+      for (const host of ["127.0.0.1#@evil.example", "127.0.0.1?x", "127.0.0.1/path", "127.0.0.1@evil.example", "evil.example#127.0.0.1", "localhost:80x", "127.0.0.1:"]) {
+        assert.strictEqual((await raw(port, { path: "/", headers: { Host: host } })).status, 403, host);
+        assert.strictEqual((await raw(port, { path: "/oauth/callback?state=x", headers: { Host: host } })).status, 403, host);
+      }
 
     await test("browser routes: Host allowlist, methods, unknown servers", async () => {
       assert.strictEqual((await raw(port, { path: "/", headers: { Host: "evil.example" } })).status, 403);

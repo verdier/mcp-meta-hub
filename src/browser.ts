@@ -32,11 +32,10 @@ function message(res: ServerResponse, status: number, title: string, text: strin
 }
 
 function hostname(req: IncomingMessage): string | undefined {
-  try {
-    return new URL(`http://${req.headers.host ?? ""}`).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
+/** `host[:port]` and nothing else: no userinfo, path, query or fragment to be parsed away. */
+const HOST = /^(\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::\d{1,5})?$/i;
+
+  return HOST.exec(req.headers.host ?? "")?.[1]?.toLowerCase();
 }
 
 /** The callback's `state` and `code` or `error`, or undefined if anything else is off. */
