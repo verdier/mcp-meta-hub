@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { pureOrigin } from "./oauth/network.js";
 
 /** `true` exposes every tool of the server directly; an array selects tools by original name. */
 const AlwaysSchema = z.union([z.boolean(), z.array(z.string())]).optional();
@@ -30,7 +31,7 @@ const ChildOAuthSchema = z.union([
     clientId: z.string().min(1).optional(),
     clientName: z.string().min(1).optional(),
     /** Origins other than the endpoint's that OAuth traffic may reach (e.g. a separate authorization server). */
-    allowedOrigins: z.array(z.string().url()).optional(),
+    allowedOrigins: z.array(z.string().refine((v) => pureOrigin(v) !== undefined, "must be an origin: http(s)://host[:port], no path, query, fragment or credentials")).optional(),
     /** Allow private and loopback addresses, and plain HTTP to them. Never implied. */
     allowPrivateNetwork: z.boolean().optional(),
   }).strict(),

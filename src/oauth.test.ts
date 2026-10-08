@@ -67,6 +67,16 @@ async function run() {
     }
   });
 
+  await test("config: allowedOrigins entries must be bare origins", () => {
+    const with_ = (allowedOrigins: string[]) => issues({ servers: { a: http({ oauth: { allowedOrigins } }) }, oauth: global });
+    for (const bad of ["https://auth.example/path", "https://auth.example?x=1", "https://auth.example#f", "https://u:p@auth.example", "ftp://auth.example", "auth.example", ""]) {
+      assert.ok(with_([bad]).some((i) => i.includes("allowedOrigins")), bad);
+    }
+    for (const good of ["https://auth.example", "https://auth.example/", "http://127.0.0.1:8080"]) {
+      assert.deepStrictEqual(with_([good]), [], good);
+    }
+  });
+
   await test("config: unknown child oauth options are rejected", () => {
     assert.ok(issues({ servers: { a: http({ oauth: { clientSecret: "x" } }) }, oauth: global }).length > 0);
   });
