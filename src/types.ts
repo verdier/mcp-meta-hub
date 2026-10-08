@@ -4,7 +4,7 @@ import type { ConfigSchema, ServerConfigSchema } from "./config.js";
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export interface CatalogEntry {
   /** Fully qualified name: `{serverName}__{toolName}` */
