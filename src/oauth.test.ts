@@ -251,13 +251,13 @@ async function run() {
     allowPrivateNetwork?: boolean;
     respond?: (url: URL, init: RequestInit) => Response;
   }) => {
-    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const requests: Array<{ url: string; headers: string[] }> = [];
     const network = createNetworkPolicy({
       approvedOrigins: opts.origins ?? ["https://mcp.example"],
       allowPrivateNetwork: opts.allowPrivateNetwork,
       resolveHost: async () => (opts.addresses ?? ["93.184.216.34"]).map((address) => ({ address })),
       request: async (url, init) => {
-        requests.push({ url: url.toString(), authorization: new Headers(init.headers).get("authorization") });
+        requests.push({ url: url.toString(), headers: Array.from(new Headers(init.headers).keys()).sort() });
         return opts.respond?.(url, init) ?? new Response("ok");
       },
     });
@@ -271,6 +271,18 @@ async function run() {
       assert.strictEqual(requests.length, 0, address);
     }
     assert.ok(isPublicAddress("93.184.216.34") && isPublicAddress("2606:4700::1"));
+  });
+
+  await test("network: special-purpose IPv6 and IPv4 ranges are not public, their neighbours are", () => {
+    for (const address of ["100::1", "2001::1", "2001:2::1", "2001:10::1", "2001:20::1", "2001:db8::1", "2001:1ff::1", "2002::1", "3fff::1", "5f00::1",
+      "64:ff9b::808:808", "64:ff9b:1::1", "::", "::1", "::ffff:8.8.8.8", "fe80::1", "fec0::1", "fc00::1", "ff02::1", "4000::1", "198.51.100.7", "192.0.2.1", "192.0.0.9", "203.0.113.5", "198.18.0.1", "240.0.0.1"]) {
+      assert.strictEqual(isPublicAddress(address), false, address);
+    }
+    for (const address of ["2001:200::1", "2001:4860:4860::8888", "2a00:1450:4001::1", "3fff:1000::1", "198.51.101.7", "198.51.0.1", "192.0.3.1", "198.17.0.1", "198.20.0.1"]) {
+      assert.strictEqual(isPublicAddress(address), true, address);
+    }
+    assert.throws(() => isPublicAddress("example.com"), /Not an IP/);
+    assert.throws(() => isPublicAddress(""), /Not an IP/);
   });
 
   await test("network: one private answer among public ones is enough to refuse", async () => {
@@ -324,15 +336,23 @@ async function run() {
     assert.strictEqual(requests.length, 1);
   });
 
-  await test("network: approved cross-origin redirect drops Authorization; redirect count is bounded", async () => {
+  await test("network: a cross-origin redirect keeps only accept and content-type; redirect count is bounded", async () => {
     const { network, requests } = policy({
       origins: ["https://mcp.example", "https://auth.example"],
       respond: (url) => url.origin === "https://mcp.example"
         ? new Response(null, { status: 302, headers: { location: "https://auth.example/meta" } })
         : new Response("meta"),
     });
-    assert.strictEqual(await (await network.fetch("https://mcp.example/meta", { headers: { Authorization: "Bearer t" } })).text(), "meta");
-    assert.deepStrictEqual(requests.map((r) => r.authorization), ["Bearer t", null]);
+    const headers = { Authorization: "Bearer t", Cookie: "s=1", "X-Api-Key": "k", "Proxy-Authorization": "p", "X-Custom": "c", Accept: "application/json", "Content-Type": "text/plain" };
+    assert.strictEqual(await (await network.fetch("https://mcp.example/meta", { headers })).text(), "meta");
+    assert.deepStrictEqual(requests.map((r) => r.headers), [
+      ["accept", "authorization", "content-type", "cookie", "proxy-authorization", "x-api-key", "x-custom"],
+      ["accept", "content-type"],
+    ]);
+    // Same origin: nothing is dropped.
+    const same = policy({ respond: (url) => url.pathname === "/a" ? new Response(null, { status: 302, headers: { location: "/b" } }) : new Response("b") });
+    await same.network.fetch("https://mcp.example/a", { headers: { Authorization: "Bearer t" } });
+    assert.deepStrictEqual(same.requests.map((r) => r.headers.includes("authorization")), [true, true]);
 
     const loop = policy({ respond: () => new Response(null, { status: 302, headers: { location: "/again" } }) });
     await assert.rejects(loop.network.fetch("https://mcp.example/"), /limit/);
