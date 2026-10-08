@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { VERSION, type ServerConfig } from "./types.js";
 
 export interface ConnectedServer {
@@ -62,7 +63,8 @@ export function childEnv(
   return { ...env, ...(declared ? resolveEnvRefs(declared, base) : {}) };
 }
 
-export async function connectServer(name: string, config: ServerConfig): Promise<ConnectedServer> {
+/** `fetch` replaces the HTTP stack of a streamable-http child (OAuth children). */
+export async function connectServer(name: string, config: ServerConfig, fetch?: FetchLike): Promise<ConnectedServer> {
   const client = new Client({ name: `mcp-meta-hub/${name}`, version: VERSION });
 
   if (isStdioConfig(config)) {
@@ -95,6 +97,7 @@ export async function connectServer(name: string, config: ServerConfig): Promise
   const urlConfig = config as { url: string; headers?: Record<string, string> };
   const transport = new StreamableHTTPClientTransport(new URL(urlConfig.url), {
     requestInit: urlConfig.headers ? { headers: urlConfig.headers } : undefined,
+    fetch,
   });
   await client.connect(transport);
   return {
