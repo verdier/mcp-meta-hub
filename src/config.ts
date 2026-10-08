@@ -37,6 +37,8 @@ const ChildOAuthSchema = z.union([
   }).strict(),
 ]);
 
+export type ChildOAuthOptions = Exclude<z.infer<typeof ChildOAuthSchema>, true>;
+
 const StreamableHttpServerSchema = z.object({
   url: z.string().url(),
   transport: z.literal("streamable-http").optional(),

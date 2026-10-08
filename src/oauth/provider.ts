@@ -1,31 +1,23 @@
 import { randomBytes } from "node:crypto";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { ChildOAuthOptions } from "../config.js";
 import { assertNotCancelled } from "./operation.js";
 import { HubError } from "./errors.js";
 import type { AuthorizationBroker } from "./broker.js";
 import type { CredentialRecord, CredentialStore } from "./store.js";
 
-export interface ProviderOptions {
-  clientId?: string;
-  scopes: string[];
-  clientName: string;
-}
+export type ProviderOptions = Pick<ChildOAuthOptions, "clientId"> & { scopes: string[]; clientName: string };
 
 /**
- * The SDK's OAuth client provider for one child. A dynamically registered public
- * client (`token_endpoint_auth_method: none`) unless a `clientId` is configured.
- * It never opens anything: in interactive mode it publishes the authorization URL
- * to the broker; otherwise (a background refresh) it leaves no trace, so a failed
- * refresh cannot cancel an authorization a human has started. The PKCE verifier
- * belongs to the flow (kept by the broker under its state); the one the SDK reads
- * during a code exchange is set by the caller for that exchange only. Nothing is
- * persisted on behalf of a cancelled queue item.
+ * The SDK's OAuth client provider for one child (a public client unless a
+ * `clientId` is configured). It opens nothing: interactively it publishes the
+ * authorization URL to the broker, in the background it leaves no trace, so a
+ * failed refresh cannot cancel an authorization a human started. PKCE verifiers
+ * belong to flows (the broker); nothing is persisted for a cancelled queue item.
  */
 export class HubOAuthProvider implements OAuthClientProvider {
-  /** Set by the child, inside its queue, while it runs an explicit "connect". */
   interactive = false;
-  /** Verifier of the flow whose code is being exchanged. */
   exchangeVerifier?: string;
   private activeState?: string;
 
@@ -67,14 +59,8 @@ export class HubOAuthProvider implements OAuthClientProvider {
     return (await this.store.load(this.key))?.tokens;
   }
 
-  /** A response without a refresh token keeps the previous one. */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    await this.store.update(this.key, (current) => {
-      assertNotCancelled();
-      const record = prepared(current);
-      const previous = record.tokens?.refresh_token;
-      return { ...record, tokens: tokens.refresh_token === undefined && previous !== undefined ? { ...tokens, refresh_token: previous } : tokens };
-    });
+    await this.merge({ tokens });
   }
 
   /**

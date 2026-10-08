@@ -246,7 +246,7 @@ async function run() {
     });
   });
 
-  await test("provider: saveTokens keeps the old refresh token; the verifier is never stored", async () => {
+  await test("provider: saveTokens stores what the SDK hands over (it preserves the refresh token itself); the verifier is never stored", async () => {
     await withDir(async (dir) => {
       const store = new CredentialStore(dir);
       await store.prepare("a", endpoint);
@@ -257,7 +257,7 @@ async function run() {
       p.saveCodeVerifier("verifier-123");
       await p.saveTokens({ access_token: "a1", refresh_token: "r1", token_type: "bearer" });
       await p.saveTokens({ access_token: "a2", token_type: "bearer" });
-      assert.deepStrictEqual(await p.tokens(), { access_token: "a2", refresh_token: "r1", token_type: "bearer" });
+      assert.deepStrictEqual(await p.tokens(), { access_token: "a2", token_type: "bearer" });
       assert.throws(() => p.codeVerifier(), /verifier/, "only an exchange in progress has a verifier");
       assert.ok(!(await readFile(store.filePath, "utf8")).includes("verifier-123"));
     });
