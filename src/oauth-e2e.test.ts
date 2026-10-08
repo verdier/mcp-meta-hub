@@ -5,13 +5,14 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { request, type Server as HttpServer } from "node:http";
+import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import { Hub } from "./hub.js";
 import { startHttp } from "./http.js";
-import { FakeOAuthServer, freePort } from "./oauth-fake.js";
+import { FakeOAuthServer } from "./oauth-fake.js";
+import { browser, freePort, raw as rawRequest } from "./test-support.js";
 import { STORE_FILE } from "./oauth/store.js";
 import { createRunner } from "./test-runner.js";
 import type { Config } from "./types.js";
@@ -19,18 +20,8 @@ import type { Config } from "./types.js";
 type TextContent = { type: string; text: string };
 const TOKEN = "oauth-e2e-token";
 
-/** Raw request, for headers fetch will not let us set (Host). */
-function raw(port: number, opts: { method?: string; path: string; headers?: Record<string, string> }): Promise<{ status: number; headers: Record<string, unknown>; body: string }> {
-  return new Promise((res, rej) => {
-    const req = request({ host: "127.0.0.1", port, path: opts.path, method: opts.method ?? "GET", headers: opts.headers }, (r) => {
-      let body = "";
-      r.on("data", (d) => (body += d));
-      r.on("end", () => res({ status: r.statusCode!, headers: r.headers, body }));
-    });
-    req.once("error", rej);
-    req.end();
-  });
-}
+/** GET unless told otherwise. */
+const raw = (port: number, opts: Parameters<typeof rawRequest>[1]) => rawRequest(port, { method: "GET", ...opts });
 
 async function run() {
   const { test, finish } = createRunner();
@@ -74,19 +65,7 @@ async function run() {
   const listed = async () => (await client.listTools()).tools.map((t) => t.name).sort();
   const status = (name: string) => hub.servers().find((s) => s.name === name)!.status;
   const stored = async () => JSON.parse(await readFile(join(storeDir, STORE_FILE), "utf8")).credentials.fake;
-  const start = (name = "fake", origin: string | null = hubOrigin) =>
-    fetch(`${hubOrigin}/oauth/start/${name}`, { method: "POST", redirect: "manual", headers: origin ? { Origin: origin } : {} });
-  /** Play the browser at the provider: follow the authorization URL to the callback URL. */
-  const consent = async (authorizationUrl: string) => {
-    const r = await fetch(authorizationUrl, { redirect: "manual" });
-    assert.strictEqual(r.status, 302, "the fake refused the authorization request");
-    return r.headers.get("location")!;
-  };
-  const authorize = async () => {
-    const s = await start();
-    assert.strictEqual(s.status, 303);
-    return fetch(await consent(s.headers.get("location")!));
-  };
+  const { start, consent, begin, authorize } = browser(hubOrigin);
 
   try {
     await test("startup without a token: needs-auth, hub serves the other children", async () => {

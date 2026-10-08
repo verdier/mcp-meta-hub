@@ -6,7 +6,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import { createServer as createNetServer, type AddressInfo } from "node:net";
+import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -43,17 +43,6 @@ export interface FakeBehaviour {
   prmDelayMs?: number;
   /** `tools/call` of `echo` fails with this JSON-RPC error message. */
   echoErrorMessage?: string;
-}
-
-export function freePort(): Promise<number> {
-  return new Promise((res, rej) => {
-    const s = createNetServer();
-    s.once("error", rej);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address() as { port: number };
-      s.close(() => res(port));
-    });
-  });
 }
 
 const b64url = (buf: Buffer) => buf.toString("base64url");

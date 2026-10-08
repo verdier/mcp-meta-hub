@@ -5,12 +5,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
-import { request } from "node:http";
 import { writeFile, unlink } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strict as assert } from "node:assert";
+import { raw, freePort } from "./test-support.js";
 import { createRunner } from "./test-runner.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,17 +19,6 @@ type TextContent = { type: string; text: string };
 
 const TOKEN_A = "token-a-0123456789";
 const TOKEN_B = "token-b-0123456789";
-
-function freePort(): Promise<number> {
-  return new Promise((res, rej) => {
-    const s = createServer();
-    s.once("error", rej);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address() as { port: number };
-      s.close(() => res(port));
-    });
-  });
-}
 
 function startHub(configPath: string, port: number): Promise<ChildProcess> {
   const child = spawn("node", [resolve(projectRoot, "dist/index.js"), configPath, "--http", `127.0.0.1:${port}`], {
@@ -70,22 +58,6 @@ async function connect(port: number, token: string): Promise<Client> {
   const client = new Client({ name: "http-test", version: "1.0.0" });
   await client.connect(transport);
   return client;
-}
-
-/** Raw request: fetch cannot override the Host header. */
-function raw(
-  port: number,
-  opts: { method?: string; headers: Record<string, string>; body?: string },
-): Promise<{ status: number; type: string; body: string }> {
-  return new Promise((res, rej) => {
-    const req = request({ host: "127.0.0.1", port, path: "/mcp", method: opts.method ?? "POST", headers: opts.headers }, (r) => {
-      let body = "";
-      r.on("data", (d) => (body += d));
-      r.on("end", () => res({ status: r.statusCode!, type: String(r.headers["content-type"]), body }));
-    });
-    req.once("error", rej);
-    req.end(opts.body);
-  });
 }
 
 async function envReport(client: Client): Promise<{ env: Record<string, string>; pid: number }> {

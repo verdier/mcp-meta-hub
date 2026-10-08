@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import { Hub } from "./hub.js";
 import { startHttp } from "./http.js";
-import { FakeOAuthServer, freePort } from "./oauth-fake.js";
+import { FakeOAuthServer } from "./oauth-fake.js";
+import { browser, freePort } from "./test-support.js";
 import { STORE_FILE } from "./oauth/store.js";
 import { createRunner } from "./test-runner.js";
 import type { Config } from "./types.js";
@@ -39,15 +40,7 @@ async function run() {
   const status = () => hub.servers().find((s) => s.name === "fake")!.status;
   const call = (name = "fake__echo") => hub.callTool(name, {});
   const stored = async () => JSON.parse(await readFile(join(storeDir, STORE_FILE), "utf8")).credentials.fake;
-  const start = () => fetch(`${hubOrigin}/oauth/start/fake`, { method: "POST", redirect: "manual", headers: { Origin: hubOrigin } });
-  const consent = async (authorizationUrl: string) => (await fetch(authorizationUrl, { redirect: "manual" })).headers.get("location")!;
-  /** Start, and play the provider: the callback URL the browser would be sent to. */
-  const begin = async () => {
-    const s = await start();
-    assert.strictEqual(s.status, 303);
-    return consent(s.headers.get("location")!);
-  };
-  const authorize = async () => fetch(await begin());
+  const { start, consent, begin, authorize } = browser(hubOrigin);
   const logs: string[] = [];
   const realError = console.error;
   // The hub's log lines are collected; the runner's own failure report goes through.
