@@ -8,7 +8,6 @@ import type { Hub } from "./hub.js";
 import { createMcpServer } from "./meta-tools.js";
 
 type Req = IncomingMessage & { body?: unknown; auth?: AuthInfo };
-type Res = ServerResponse & { status(code: number): Res; json(body: unknown): Res; set(name: string, value: string): Res };
 
 // Exactly the hosts the SDK protects against DNS rebinding (case-sensitive).
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -66,7 +65,7 @@ const jsonRpcError = (res: ServerResponse, status: number, code: number, message
 };
 
 /** Bearer gate: true if the token matches a client (sets `req.auth`), else answers 401. */
-export function authenticate(tokens: Map<string, string>) {
+function authenticate(tokens: Map<string, string>) {
   const digests = Array.from(tokens, ([client, token]) => ({ client, digest: digest(token) }));
   return (req: Req, res: ServerResponse): boolean => {
     const match = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
@@ -86,13 +85,7 @@ export function authenticate(tokens: Map<string, string>) {
   };
 }
 
-const methodNotAllowed = (_req: Req, res: Res) => {
-  res.set("Allow", "POST").status(405).json({
-    jsonrpc: "2.0",
-    error: { code: -32000, message: "Method not allowed." },
-    id: null,
-  });
-};
+const methodNotAllowed = (_req: Req, res: ServerResponse) => jsonRpcError(res, 405, -32000, "Method not allowed.", { Allow: "POST" });
 
 /**
  * Serve the hub over stateless Streamable HTTP on `/mcp`: no session, a fresh
@@ -103,7 +96,7 @@ export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, strin
   app.disable("x-powered-by");
   const route = "/mcp";
 
-  app.post(route, (async (req: Req, res: Res) => {
+  app.post(route, (async (req: Req, res: ServerResponse) => {
     const server = createMcpServer(hub);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
@@ -116,7 +109,7 @@ export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, strin
     } catch (err) {
       console.error(`[mcp-meta-hub] Request failed: ${err}`);
       if (!res.headersSent) {
-        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+        jsonRpcError(res, 500, -32603, "Internal server error");
       }
     }
   }) as never);
@@ -125,7 +118,7 @@ export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, strin
   app.delete(route, methodNotAllowed as never);
 
   // Body-parser failures (malformed JSON) become JSON-RPC errors, never an HTML page.
-  app.use(((err: { status?: number }, _req: Req, res: Res, _next: unknown) => {
+  app.use(((err: { status?: number }, _req: Req, res: ServerResponse, _next: unknown) => {
     const status = err.status && err.status >= 400 && err.status < 500 ? err.status : 500;
     jsonRpcError(res, status, status === 500 ? -32603 : -32700, status === 500 ? "Internal server error" : "Parse error");
   }) as never);
