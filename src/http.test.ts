@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
+import { request } from "node:http";
 import { writeFile, unlink } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,14 @@ function freePort(): Promise<number> {
 function startHub(configPath: string, port: number): Promise<ChildProcess> {
   const child = spawn("node", [resolve(projectRoot, "dist/index.js"), configPath, "--http", `127.0.0.1:${port}`], {
     cwd: projectRoot,
-    env: { ...process.env, HUB_TOKEN_A: TOKEN_A, HUB_TOKEN_B: TOKEN_B },
+    env: {
+      ...process.env,
+      HUB_TOKEN_A: TOKEN_A,
+      HUB_TOKEN_B: TOKEN_B,
+      TEST_PARENT_API_KEY: "parent-key",
+      TEST_PARENT_SECRET: "parent-secret",
+      TEST_DECLARED_TOKEN: "declared-value",
+    },
     stdio: ["ignore", "ignore", "pipe"],
   });
   return new Promise((res, rej) => {
@@ -63,6 +71,27 @@ async function connect(port: number, token: string): Promise<Client> {
   return client;
 }
 
+/** Raw request: fetch cannot override the Host header. */
+function raw(
+  port: number,
+  opts: { method?: string; headers: Record<string, string>; body?: string },
+): Promise<{ status: number; type: string; body: string }> {
+  return new Promise((res, rej) => {
+    const req = request({ host: "127.0.0.1", port, path: "/mcp", method: opts.method ?? "POST", headers: opts.headers }, (r) => {
+      let body = "";
+      r.on("data", (d) => (body += d));
+      r.on("end", () => res({ status: r.statusCode!, type: String(r.headers["content-type"]), body }));
+    });
+    req.once("error", rej);
+    req.end(opts.body);
+  });
+}
+
+async function envReport(client: Client): Promise<{ env: Record<string, string>; pid: number }> {
+  const r = await client.callTool({ name: "call_tool", arguments: { name: "envchild__env_report" } });
+  return JSON.parse((r.content as TextContent[])[0].text);
+}
+
 async function run() {
   let passed = 0;
   let failed = 0;
@@ -85,6 +114,11 @@ async function run() {
   await writeFile(configPath, JSON.stringify({
     servers: {
       weather: { command: "node", args: ["examples/weather/dist/index.js"], always: ["list_cities"] },
+      envchild: {
+        command: "node",
+        args: ["test/env-child.mjs"],
+        env: { DECLARED_LITERAL: "lit", DECLARED_REF: "$TEST_DECLARED_TOKEN" },
+      },
     },
     clients: { alpha: { tokenEnv: "HUB_TOKEN_A" }, beta: { tokenEnv: "HUB_TOKEN_B" } },
   }));
@@ -117,6 +151,62 @@ async function run() {
         const res = await fetch(url, { method, headers: { Authorization: `Bearer ${TOKEN_A}` } });
         assert.strictEqual(res.status, 405);
       }
+    });
+
+    const json = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+
+    await test("a foreign Host header is rejected even when authenticated", async () => {
+      const r = await raw(port, {
+        headers: { ...json, Host: "evil.example", Authorization: `Bearer ${TOKEN_A}` },
+        body: JSON.stringify(rpc),
+      });
+      assert.strictEqual(r.status, 403);
+    });
+
+    await test("unauthenticated malformed JSON gets 401, not a body-parser error", async () => {
+      const r = await raw(port, { headers: json, body: "{" });
+      assert.strictEqual(r.status, 401);
+      assert.ok(r.type.includes("application/json"));
+    });
+
+    await test("authenticated malformed JSON gets a JSON-RPC parse error", async () => {
+      const r = await raw(port, { headers: { ...json, Authorization: `Bearer ${TOKEN_A}` }, body: "{" });
+      assert.strictEqual(r.status, 400);
+      assert.ok(r.type.includes("application/json"));
+      assert.strictEqual(JSON.parse(r.body).error.code, -32700);
+    });
+
+    await test("responses do not advertise Express", async () => {
+      const res = await post({});
+      assert.strictEqual(res.headers.get("x-powered-by"), null);
+    });
+
+    await test("call_tool on a meta-tool name explains itself", async () => {
+      const client = await connect(port, TOKEN_A);
+      const r = await client.callTool({ name: "call_tool", arguments: { name: "list_tools" } });
+      assert.ok(r.isError);
+      assert.ok((r.content as TextContent[])[0].text.includes("meta-tool"));
+      await client.close();
+    });
+
+    await test("stdio child env: secrets scrubbed, declared kept, PATH/HOME kept", async () => {
+      const client = await connect(port, TOKEN_A);
+      const { env } = await envReport(client);
+      for (const name of ["TEST_PARENT_API_KEY", "TEST_PARENT_SECRET", "HUB_TOKEN_A", "HUB_TOKEN_B", "TEST_DECLARED_TOKEN"]) {
+        assert.strictEqual(env[name], undefined, `${name} leaked to the child`);
+      }
+      assert.strictEqual(env.DECLARED_LITERAL, "lit");
+      assert.strictEqual(env.DECLARED_REF, "declared-value");
+      assert.ok(env.PATH);
+      assert.ok(env.HOME);
+      await client.close();
+    });
+
+    await test("two clients share one child process", async () => {
+      const [a, b] = await Promise.all([connect(port, TOKEN_A), connect(port, TOKEN_B)]);
+      const [ra, rb] = await Promise.all([envReport(a), envReport(b)]);
+      assert.strictEqual(ra.pid, rb.pid);
+      await Promise.all([a.close(), b.close()]);
     });
 
     await test("tools/list shows the meta-tools and the always tool only", async () => {
@@ -175,6 +265,19 @@ async function run() {
       hub = await startHub(configPath, port);
       const second = await client.callTool({ name: "weather__list_cities", arguments: {} });
       assert.ok(!second.isError);
+      await client.close();
+    });
+
+    await test("a child killed after startup yields isError and the hub keeps serving", async () => {
+      const client = await connect(port, TOKEN_A);
+      const { pid } = await envReport(client);
+      process.kill(pid, "SIGKILL");
+      await new Promise((r) => setTimeout(r, 300));
+      const dead = await client.callTool({ name: "call_tool", arguments: { name: "envchild__env_report" } });
+      assert.ok(dead.isError);
+      assert.ok((dead.content as TextContent[])[0].text.length > 0);
+      const alive = await client.callTool({ name: "weather__list_cities", arguments: {} });
+      assert.ok(!alive.isError);
       await client.close();
     });
   } finally {

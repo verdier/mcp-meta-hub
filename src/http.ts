@@ -1,6 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { Server as HttpServer } from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
@@ -8,11 +7,11 @@ import type { Config } from "./types.js";
 import type { Hub } from "./hub.js";
 import { createMcpServer } from "./meta-tools.js";
 
-type Req = IncomingMessage & { body?: unknown; auth?: AuthInfo; headers: IncomingMessage["headers"] };
+type Req = IncomingMessage & { body?: unknown; auth?: AuthInfo };
 type Res = ServerResponse & { status(code: number): Res; json(body: unknown): Res; set(name: string, value: string): Res };
-type Next = () => void;
 
-const LOOPBACK = /^(localhost|::1|127(\.\d{1,3}){3})$/i;
+// Exactly the hosts the SDK protects against DNS rebinding (case-sensitive).
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
 
 export interface HttpAddress {
   host: string;
@@ -24,12 +23,13 @@ export function parseHttpAddress(value: string): HttpAddress {
   const idx = value.lastIndexOf(":");
   if (idx <= 0) throw new Error(`Invalid --http value "${value}": expected <host:port>`);
   const host = value.slice(0, idx).replace(/^\[(.*)\]$/, "$1");
-  const port = Number(value.slice(idx + 1));
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+  const portText = value.slice(idx + 1);
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (!Number.isInteger(port) || port > 65535) {
     throw new Error(`Invalid --http value "${value}": bad port`);
   }
-  if (!LOOPBACK.test(host)) {
-    throw new Error(`Refusing to listen on "${host}": only loopback addresses are allowed`);
+  if (!LOOPBACK.has(host)) {
+    throw new Error(`Refusing to listen on ${JSON.stringify(host)}: only loopback addresses are allowed`);
   }
   return { host, port };
 }
@@ -60,10 +60,15 @@ export function resolveClientTokens(
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
 
-/** Bearer middleware: 401 unless the token matches a client; sets `req.auth`. */
-export function bearerAuth(tokens: Map<string, string>) {
+const jsonRpcError = (res: ServerResponse, status: number, code: number, message: string, headers: Record<string, string> = {}) => {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
+  res.end(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }));
+};
+
+/** Bearer gate: true if the token matches a client (sets `req.auth`), else answers 401. */
+export function authenticate(tokens: Map<string, string>) {
   const digests = Array.from(tokens, ([client, token]) => ({ client, digest: digest(token) }));
-  return (req: Req, res: Res, next: Next): void => {
+  return (req: Req, res: ServerResponse): boolean => {
     const match = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
     if (match) {
       const given = digest(match[1]);
@@ -73,15 +78,11 @@ export function bearerAuth(tokens: Map<string, string>) {
       }
       if (found) {
         req.auth = { token: "", clientId: found, scopes: [] };
-        next();
-        return;
+        return true;
       }
     }
-    res.set("WWW-Authenticate", "Bearer").status(401).json({
-      jsonrpc: "2.0",
-      error: { code: -32001, message: "Unauthorized" },
-      id: null,
-    });
+    jsonRpcError(res, 401, -32001, "Unauthorized", { "WWW-Authenticate": "Bearer" });
+    return false;
   };
 }
 
@@ -99,9 +100,8 @@ const methodNotAllowed = (_req: Req, res: Res) => {
  */
 export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, string>): Promise<HttpServer> {
   const app = createMcpExpressApp({ host: addr.host });
+  app.disable("x-powered-by");
   const route = "/mcp";
-
-  app.use(route, bearerAuth(tokens) as never);
 
   app.post(route, (async (req: Req, res: Res) => {
     const server = createMcpServer(hub);
@@ -124,11 +124,23 @@ export function startHttp(hub: Hub, addr: HttpAddress, tokens: Map<string, strin
   app.get(route, methodNotAllowed as never);
   app.delete(route, methodNotAllowed as never);
 
+  // Body-parser failures (malformed JSON) become JSON-RPC errors, never an HTML page.
+  app.use(((err: { status?: number }, _req: Req, res: Res, _next: unknown) => {
+    const status = err.status && err.status >= 400 && err.status < 500 ? err.status : 500;
+    jsonRpcError(res, status, status === 500 ? -32603 : -32700, status === 500 ? "Internal server error" : "Parse error");
+  }) as never);
+
+  // The bearer gate wraps the whole app: nothing, not even body parsing, runs before it.
+  const gate = authenticate(tokens);
+  const httpServer = createServer((req, res) => {
+    if (gate(req, res)) (app as unknown as (q: IncomingMessage, r: ServerResponse) => void)(req, res);
+  });
+
   return new Promise((resolve, reject) => {
-    const httpServer = app.listen(addr.port, addr.host, () => {
+    httpServer.once("error", reject);
+    httpServer.listen(addr.port, addr.host, () => {
       httpServer.off("error", reject);
       resolve(httpServer);
     });
-    httpServer.once("error", reject);
   });
 }

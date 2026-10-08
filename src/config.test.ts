@@ -169,6 +169,18 @@ async function run() {
     assert.throws(() => parseHttpAddress("127.0.0.1:99999"), /port/);
   });
 
+  await test("--http rejects non-canonical loopback spellings", () => {
+    for (const v of ["127.0.0.2:80", "LOCALHOST:80", "127.1:80", "[::ffff:127.0.0.1]:80", "0.0.0.0:80"]) {
+      assert.throws(() => parseHttpAddress(v), /loopback/, v);
+    }
+  });
+
+  await test("--http rejects malformed ports", () => {
+    for (const v of ["127.0.0.1:", "127.0.0.1:0x10", "127.0.0.1:1e3", "127.0.0.1: 80", "127.0.0.1:-1", "127.0.0.1:80.5"]) {
+      assert.throws(() => parseHttpAddress(v), /port|host:port/, v);
+    }
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }
