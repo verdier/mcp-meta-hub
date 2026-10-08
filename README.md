@@ -263,26 +263,28 @@ Per child, `oauth` is `true` or an object (only on `streamable-http` children; e
 | `scopes` | Scopes requested when the server's metadata advertises none. |
 | `clientId` | Pre-registered public client. Without it the hub registers itself dynamically. |
 | `clientName` | Client name sent at registration (default `mcp-meta-hub`). |
-| `allowedOrigins` | Origins other than the endpoint's that this child's OAuth traffic may reach, typically a separate authorization server. |
+| `allowedOrigins` | Origins other than the endpoint's that this child's OAuth traffic may reach, typically a separate authorization server. Each entry is a bare origin (`https://auth.example.org`): a path, query, fragment or credentials is a config error. |
 | `allowPrivateNetwork` | Allow private, loopback and link-local addresses, and plain HTTP to them only. For tests and servers on your own network. Off unless set. |
 
 ### Lifecycle
 
-- **Startup**: each OAuth child connects with its stored grant. Without one (or if the grant is rejected) the child is `needs-auth`: it has no tools, and the hub starts and serves the others anyway.
-- **Refresh**: on a `401` the hub refreshes the access token once and retries. Refreshes of one child are serialized, so concurrent calls on an expired token make a single refresh (servers that rotate refresh tokens would otherwise revoke the grant). A refresh response without a new refresh token keeps the previous one.
+- **Protocol**: an OAuth child speaks through the MCP SDK's own HTTP transport and OAuth client: `401` and `WWW-Authenticate` handling (resource metadata URL and scope from the challenge), refresh, `403 insufficient_scope` step-up and the loop breakers are the SDK's, unchanged. The hub adds the credential store, the network guard and the queue below.
+- **One operation at a time per OAuth child**: every request to the child, its (re)connection, an authorization start and a code exchange go through one serial queue, so a refresh a request triggers never overlaps anything else (servers that rotate refresh tokens would otherwise revoke the grant, and a stale refresh could overwrite a newer authorization). Calls to one OAuth child therefore do not run in parallel. An item leaves the queue only when its work has really stopped; a timeout (30 s to connect or authorize, 60 s for a call) answers the caller and aborts the item's requests. Other children are unaffected.
+- **Startup**: each OAuth child connects with its stored grant. Without one (or if the grant is rejected) the child is `needs-auth`: it has no tools, and the hub starts and serves the others anyway. A child never connected makes one unauthenticated request and, the first time, registers a client dynamically (the registration is stored and reused); likewise a server that rejects the client (`invalid_client`) is re-registered in the background, with no authorization published.
+- **Refresh**: on a `401` the SDK refreshes the access token once and retries. A refresh response without a new refresh token keeps the previous one.
 - **Rejected grant** (`invalid_grant`, `invalid_client`, a second `401` right after a refresh): the child becomes `needs-auth`, disappears from `tools/list` and `list_tools`, and a call to one of its tools returns an `isError` result: `Server "docs" needs authorization: open https://hub.example.net/`. A rejected client registration is dropped and replaced.
 - **Outage** (network error, `5xx`, timeout): the call fails, the grant is kept, nobody is asked to log in again.
 - **After an authorization**: only that child reconnects; its catalog entries (including `always`) are replaced in one step, the rules for collisions are unchanged, calls already running on the old connection finish before it is closed.
 
 ### Browser surface
 
-With `--http` and a global `oauth`, the listener also serves three pages, **outside the bearer gate** and with their own `Host` allowlist (the host of `redirectUrl`, plus loopback):
+With `--http` and a global `oauth`, the listener also serves three pages, **outside the bearer gate** and with their own `Host` allowlist (the host of `redirectUrl`, plus loopback; the header must be exactly `host` or `host:port`):
 
 | Route | |
 |---|---|
 | `GET /` | Status page: each child's name, transport, state (`connected`, `needs-auth`, `failed`), tool count, and a **Connect** button for OAuth children. No secret. |
-| `POST /oauth/start/<server>` | The Connect button. Refused unless the `Origin` header is exactly the origin of `redirectUrl`. Drops the child's tokens (and its client registration if it was made for another redirect URL), then redirects (`303`) to the provider. |
-| `GET /oauth/callback` | Accepts `state` with `code` or `error` (plus `iss`, `scope`, `error_description`, `error_uri`, ignored), nothing else and nothing twice. The state is single use, expires after 10 minutes, and is consumed before the code exchange. Answers with a fixed page that never echoes a parameter. |
+| `POST /oauth/start/<server>` | The Connect button. Refused unless the `Origin` header is exactly the origin of `redirectUrl`. Drops the child's tokens (and its client registration if it was made for another redirect URL), then redirects (`303`) to the provider. At most one authorization is pending per server: a newer start supersedes the older one. |
+| `GET /oauth/callback` | Accepts `state` with `code` or `error` (plus `iss`, `scope`, `error_description`, `error_uri`, ignored), nothing else and nothing twice. The state is single use and expires after 10 minutes. It is consumed, its code exchanged with its own PKCE verifier, and the child reconnected as one item of the child's queue; the callback of a superseded start is refused ("superseded, start again") without reaching the token endpoint. Answers with a fixed page that never echoes a parameter. |
 
 Every other path, `/mcp` included, behaves exactly as without OAuth: bearer first, loopback `Host` only on `/mcp`. Pages are sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and a CSP that forbids scripts and framing.
 
@@ -299,7 +301,7 @@ Everything an OAuth child sends (MCP requests, discovery, registration, token an
 - HTTPS only, no credentials or fragment in the URL;
 - origin of the child's `url` or one of its `allowedOrigins`, nothing else;
 - public addresses only: the host is resolved once, every answer must be public, and the connection is pinned to the checked address (no DNS rebinding between check and connect);
-- every redirect is checked again, at most 3, never for a non-idempotent request, and a cross-origin redirect drops `Authorization` and cookies.
+- every redirect is checked again, at most 3, never for a non-idempotent request, and a cross-origin redirect keeps only `Accept` and `Content-Type`.
 
 `allowPrivateNetwork` lifts the public-address rule for one child; plain HTTP stays refused towards a public address.
 
@@ -307,6 +309,8 @@ Everything an OAuth child sends (MCP requests, discovery, registration, token an
 
 - The status page and the Connect button are reachable without a bearer by anything that can reach the listener, including any local process. They expose server names and states only; a started authorization completes only after someone logs in at the provider in a browser.
 - The `Origin` check on Connect blocks cross-site form posts. Put the browser surface behind your reverse proxy's own access control if it is reachable from a network.
+- Logs and tool errors of OAuth children carry an error's class and HTTP status, never its message: SDK and remote errors can embed a response body, and a body can echo a credential.
+- The guard checks and pins the addresses of the hub's own requests. The authorization URL it hands to the browser is checked once (origin, address), but the browser resolves that host again by itself, which the hub cannot pin.
 - Children without `oauth` keep their fixed `headers` and do not go through the network guard.
 
 ## Skills
