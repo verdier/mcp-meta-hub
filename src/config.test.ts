@@ -4,22 +4,10 @@
 import { strict as assert } from "node:assert";
 import { ConfigSchema } from "./config.js";
 import { resolveClientTokens, parseHttpAddress } from "./http.js";
+import { createRunner } from "./test-runner.js";
 
 async function run() {
-  let passed = 0;
-  let failed = 0;
-
-  async function test(name: string, fn: () => Promise<void> | void) {
-    try {
-      await fn();
-      console.log(`  ✓ ${name}`);
-      passed++;
-    } catch (e) {
-      console.error(`  ✗ ${name}`);
-      console.error(`    ${e}`);
-      failed++;
-    }
-  }
+  const { test, finish } = createRunner();
 
   console.log("config validation tests\n");
 
@@ -181,8 +169,7 @@ async function run() {
     }
   });
 
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  finish();
 }
 
 run().catch((e) => {

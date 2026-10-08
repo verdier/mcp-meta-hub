@@ -11,33 +11,22 @@ import type { AddressInfo } from "node:net";
 import { strict as assert } from "node:assert";
 import { Hub } from "./hub.js";
 import { startHttp } from "./http.js";
+import { createRunner } from "./test-runner.js";
 
 const TOKEN = "lifecycle-token";
 
 async function run() {
-  let passed = 0;
-  let failed = 0;
-  async function test(name: string, fn: () => Promise<void>) {
-    try {
-      await fn();
-      console.log(`  ✓ ${name}`);
-      passed++;
-    } catch (e) {
-      console.error(`  ✗ ${name}`);
-      console.error(`    ${e}`);
-      failed++;
-    }
-  }
+  const { test, finish } = createRunner();
 
   // Spy on the SDK classes: record every transport that gets connected and every one that gets closed.
-  const connected = new Set<unknown>();
+  const connected: unknown[] = [];
   const closedTransports = new Set<unknown>();
   const closedServers = new Set<unknown>();
   const origConnect = Server.prototype.connect;
   const origTClose = StreamableHTTPServerTransport.prototype.close;
   const origSClose = Server.prototype.close;
   Server.prototype.connect = function (this: Server, t: never) {
-    connected.add(t);
+    connected.push(t);
     return origConnect.call(this, t);
   };
   StreamableHTTPServerTransport.prototype.close = function (this: StreamableHTTPServerTransport) {
@@ -69,7 +58,7 @@ async function run() {
     return client;
   };
   const assertAllClosed = (minimum: number) => {
-    assert.ok(connected.size >= minimum, `expected at least ${minimum} requests, saw ${connected.size}`);
+    assert.ok(connected.length >= minimum, `expected at least ${minimum} requests, saw ${connected.length}`);
     for (const t of connected) assert.ok(closedTransports.has(t), "a transport was left open");
   };
 
@@ -82,14 +71,14 @@ async function run() {
       await client.callTool({ name: "call_tool", arguments: { name: "weather__list_cities" } });
       await client.close();
       await settle();
-      assert.ok(connected.size >= 4);
-      assert.strictEqual(new Set(connected).size, connected.size);
+      assert.ok(connected.length >= 4);
+      assert.strictEqual(new Set(connected).size, connected.length, "a transport was reused across requests");
       assertAllClosed(4);
       assert.strictEqual(closedServers.size, closedTransports.size);
     });
 
     await test("transports are closed after a tool error", async () => {
-      const before = connected.size;
+      const before = connected.length;
       const client = await connect();
       const r = await client.callTool({ name: "call_tool", arguments: { name: "weather__get_forecast", arguments: { city: "atlantis" } } });
       assert.ok(r.isError);
@@ -99,7 +88,7 @@ async function run() {
     });
 
     await test("transports are closed when the client aborts mid-request", async () => {
-      const before = connected.size;
+      const before = connected.length;
       await new Promise<void>((resolve) => {
         const req = request({
           host: "127.0.0.1", port, path: "/mcp", method: "POST",
@@ -118,7 +107,7 @@ async function run() {
         req.end(JSON.stringify(body));
         req.once("socket", (s) => setTimeout(() => { s.destroy(); resolve(); }, 150));
       });
-      assert.strictEqual(connected.size, before + 1, "the aborted request never reached the handler");
+      assert.strictEqual(connected.length, before + 1, "the aborted request never reached the handler");
       await new Promise((r) => setTimeout(r, 900));
       delayMs = 0;
       assertAllClosed(before + 1);
@@ -132,8 +121,7 @@ async function run() {
     Server.prototype.close = origSClose;
   }
 
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  finish();
 }
 
 run().catch((e) => {

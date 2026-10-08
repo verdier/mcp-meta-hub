@@ -6,22 +6,10 @@ import { readFileSync } from "node:fs";
 import { resolveEnvRefs, childEnv } from "./transports.js";
 import { VERSION } from "./types.js";
 import { Hub } from "./hub.js";
+import { createRunner } from "./test-runner.js";
 
 async function run() {
-  let passed = 0;
-  let failed = 0;
-
-  async function test(name: string, fn: () => Promise<void> | void) {
-    try {
-      await fn();
-      console.log(`  ✓ ${name}`);
-      passed++;
-    } catch (e) {
-      console.error(`  ✗ ${name}`);
-      console.error(`    ${e}`);
-      failed++;
-    }
-  }
+  const { test, finish } = createRunner();
 
   // ── resolveEnvRefs ($VAR interpolation) ─────────────────────────────
 
@@ -190,8 +178,7 @@ async function run() {
     assert.strictEqual(VERSION, pkg.version);
   });
 
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  finish();
 }
 
 run().catch((e) => {

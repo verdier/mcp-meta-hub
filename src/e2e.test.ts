@@ -7,6 +7,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strict as assert } from "node:assert";
+import { createRunner } from "./test-runner.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -22,20 +23,7 @@ async function run() {
   const client = new Client({ name: "test-client", version: "1.0.0" });
   await client.connect(transport);
 
-  let passed = 0;
-  let failed = 0;
-
-  async function test(name: string, fn: () => Promise<void>) {
-    try {
-      await fn();
-      console.log(`  ✓ ${name}`);
-      passed++;
-    } catch (e) {
-      console.error(`  ✗ ${name}`);
-      console.error(`    ${e}`);
-      failed++;
-    }
-  }
+  const { test, finish } = createRunner();
 
   console.log("mcp-meta-hub e2e tests\n");
 
@@ -103,8 +91,7 @@ async function run() {
 
   await client.close();
 
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  finish();
 }
 
 run().catch((e) => {

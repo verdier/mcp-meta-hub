@@ -7,6 +7,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFile, unlink } from "node:fs/promises";
 import { strict as assert } from "node:assert";
+import { createRunner } from "./test-runner.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -14,20 +15,7 @@ const projectRoot = resolve(__dirname, "..");
 type TextContent = { type: string; text: string };
 
 async function run() {
-  let passed = 0;
-  let failed = 0;
-
-  async function test(name: string, fn: () => Promise<void>) {
-    try {
-      await fn();
-      console.log(`  ✓ ${name}`);
-      passed++;
-    } catch (e) {
-      console.error(`  ✗ ${name}`);
-      console.error(`    ${e}`);
-      failed++;
-    }
-  }
+  const { test, finish } = createRunner();
 
   console.log("resilience tests\n");
 
@@ -79,8 +67,7 @@ async function run() {
     await unlink(configPath).catch(() => {});
   }
 
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  finish();
 }
 
 run().catch((e) => {
