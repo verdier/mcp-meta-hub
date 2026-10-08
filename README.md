@@ -232,6 +232,83 @@ On `SIGTERM`/`SIGINT` the hub stops accepting connections, stops its children, a
 
 All clients share the same children, started once.
 
+## OAuth for HTTP children
+
+A remote MCP server that requires OAuth (authorization code + PKCE, with dynamic client registration or a pre-registered client) can be a child: the hub obtains the grant once through a browser, stores it, and refreshes it on its own. MCP clients of the hub never see any OAuth.
+
+```json
+{
+  "servers": {
+    "docs": { "transport": "streamable-http", "url": "https://mcp.example.com/mcp", "oauth": true },
+    "tasks": {
+      "transport": "streamable-http",
+      "url": "https://api.example.org/mcp",
+      "oauth": { "scopes": ["read"], "allowedOrigins": ["https://auth.example.org"] }
+    }
+  },
+  "clients": { "app": { "tokenEnv": "MCP_HUB_TOKEN_APP" } },
+  "oauth": { "redirectUrl": "https://hub.example.net/oauth/callback" }
+}
+```
+
+Global `oauth`:
+
+- `redirectUrl` (required as soon as a child has `oauth`): the callback as **your browser** reaches the hub, always `<origin>/oauth/callback`. HTTPS, or plain HTTP on a loopback host. The hub listens on loopback only, so a reverse proxy on another host name must forward to it.
+- `storeDir` (default `oauth`, relative to the config file): directory of the credential store.
+
+Per child, `oauth` is `true` or an object (only on `streamable-http` children; elsewhere it is a config error):
+
+| Option | Meaning |
+|---|---|
+| `scopes` | Scopes requested when the server's metadata advertises none. |
+| `clientId` | Pre-registered public client. Without it the hub registers itself dynamically. |
+| `clientName` | Client name sent at registration (default `mcp-meta-hub`). |
+| `allowedOrigins` | Origins other than the endpoint's that this child's OAuth traffic may reach, typically a separate authorization server. |
+| `allowPrivateNetwork` | Allow private, loopback and link-local addresses, and plain HTTP to them only. For tests and servers on your own network. Off unless set. |
+
+### Lifecycle
+
+- **Startup**: each OAuth child connects with its stored grant. Without one (or if the grant is rejected) the child is `needs-auth`: it has no tools, and the hub starts and serves the others anyway.
+- **Refresh**: on a `401` the hub refreshes the access token once and retries. Refreshes of one child are serialized, so concurrent calls on an expired token make a single refresh (servers that rotate refresh tokens would otherwise revoke the grant). A refresh response without a new refresh token keeps the previous one.
+- **Rejected grant** (`invalid_grant`, `invalid_client`, a second `401` right after a refresh): the child becomes `needs-auth`, disappears from `tools/list` and `list_tools`, and a call to one of its tools returns an `isError` result: `Server "docs" needs authorization: open https://hub.example.net/`. A rejected client registration is dropped and replaced.
+- **Outage** (network error, `5xx`, timeout): the call fails, the grant is kept, nobody is asked to log in again.
+- **After an authorization**: only that child reconnects; its catalog entries (including `always`) are replaced in one step, the rules for collisions are unchanged, calls already running on the old connection finish before it is closed.
+
+### Browser surface
+
+With `--http` and a global `oauth`, the listener also serves three pages, **outside the bearer gate** and with their own `Host` allowlist (the host of `redirectUrl`, plus loopback):
+
+| Route | |
+|---|---|
+| `GET /` | Status page: each child's name, transport, state (`connected`, `needs-auth`, `failed`), tool count, and a **Connect** button for OAuth children. No secret. |
+| `POST /oauth/start/<server>` | The Connect button. Refused unless the `Origin` header is exactly the origin of `redirectUrl`. Drops the child's tokens (and its client registration if it was made for another redirect URL), then redirects (`303`) to the provider. |
+| `GET /oauth/callback` | Accepts `state` with `code` or `error` (plus `iss`, `scope`, `error_description`, `error_uri`, ignored), nothing else and nothing twice. The state is single use, expires after 10 minutes, and is consumed before the code exchange. Answers with a fixed page that never echoes a parameter. |
+
+Every other path, `/mcp` included, behaves exactly as without OAuth: bearer first, loopback `Host` only on `/mcp`. Pages are sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and a CSP that forbids scripts and framing.
+
+To authorize: open the status page through the `redirectUrl` origin, press Connect, log in at the provider. In stdio mode there is no browser surface; a grant obtained in HTTP mode is used and refreshed all the same.
+
+### Credential store
+
+One JSON file, `<storeDir>/credentials.json`: per child the endpoint it is bound to, the client registration, the tokens and the discovered metadata. The directory is `0700`, the file `0600`, written atomically (temporary file, fsync, rename), and a symlink or a corrupt file stops the hub instead of being overwritten. Tokens are stored in **plaintext**: protect the directory like any secret. Changing a child's `url` discards its record. PKCE verifiers and authorization states live in memory only. One hub process per store.
+
+### Network guard
+
+Everything an OAuth child sends (MCP requests, discovery, registration, token and refresh requests) and the authorization URL handed to the browser go through an outbound guard:
+
+- HTTPS only, no credentials or fragment in the URL;
+- origin of the child's `url` or one of its `allowedOrigins`, nothing else;
+- public addresses only: the host is resolved once, every answer must be public, and the connection is pinned to the checked address (no DNS rebinding between check and connect);
+- every redirect is checked again, at most 3, never for a non-idempotent request, and a cross-origin redirect drops `Authorization` and cookies.
+
+`allowPrivateNetwork` lifts the public-address rule for one child; plain HTTP stays refused towards a public address.
+
+### Threat notes
+
+- The status page and the Connect button are reachable without a bearer by anything that can reach the listener, including any local process. They expose server names and states only; a started authorization completes only after someone logs in at the provider in a browser.
+- The `Origin` check on Connect blocks cross-site form posts. Put the browser surface behind your reverse proxy's own access control if it is reachable from a network.
+- Children without `oauth` keep their fixed `headers` and do not go through the network guard.
+
 ## Skills
 
 A **skill** is a SKILL.md file that tells the AI agent what tools are available and when to use them.
