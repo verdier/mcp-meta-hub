@@ -43,7 +43,7 @@ export function createNetworkPolicy(options: NetworkPolicyOptions): NetworkPolic
   const maxRedirects = options.maxRedirects ?? 3;
 
   const resolveApprovedUrl = async (url: URL): Promise<readonly ResolvedAddress[]> => {
-    assertUrlShape(url, allowPrivate);
+    assertUrlShape(url);
     if (!approved.has(url.origin)) throw new Error(`Network policy rejected origin ${url.origin}`);
     const hostname = stripBrackets(url.hostname);
     const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await resolveHost(hostname);
@@ -138,10 +138,9 @@ function approvedOrigin(value: string): string {
   return url.origin;
 }
 
-function assertUrlShape(url: URL, allowPrivate: boolean): void {
-  if (url.protocol !== "https:" && !(allowPrivate && url.protocol === "http:")) {
-    throw new Error("Network policy requires HTTPS");
-  }
+/** HTTPS is enforced per address: plain HTTP never reaches a public one. */
+function assertUrlShape(url: URL): void {
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Network policy requires HTTP(S)");
   if (url.username || url.password) throw new Error("Network policy rejected credentials in the URL");
   if (url.hash) throw new Error("Network policy rejected a fragment in the URL");
 }
