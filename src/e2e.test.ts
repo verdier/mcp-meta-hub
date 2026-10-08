@@ -16,7 +16,7 @@ type TextContent = { type: string; text: string };
 async function run() {
   const transport = new StdioClientTransport({
     command: "node",
-    args: [resolve(projectRoot, "dist/index.js"), resolve(projectRoot, "mcp-hub.json")],
+    args: [resolve(projectRoot, "dist/index.js"), resolve(projectRoot, "test/stdio.config.json")],
     cwd: projectRoot,
   });
   const client = new Client({ name: "test-client", version: "1.0.0" });
