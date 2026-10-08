@@ -53,7 +53,10 @@ async function main(): Promise<void> {
     await createMcpServer(hub).connect(new StdioServerTransport());
   }
 
+  let stopping = false;
   const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
     setTimeout(() => process.exit(0), SHUTDOWN_TIMEOUT_MS).unref();
     if (httpServer) {
       const closed = new Promise((resolve) => httpServer.close(resolve));
@@ -64,8 +67,11 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  // In stdio mode a parent that dies without signalling (e.g. npm exec killed)
+  // closes stdin: shut down then. Never in HTTP mode, where stdin may be /dev/null.
+  if (!httpServer) process.stdin.on("close", () => void shutdown());
 }
 
 main().catch((error) => {
