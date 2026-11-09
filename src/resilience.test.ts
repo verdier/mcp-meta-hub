@@ -19,13 +19,20 @@ async function run() {
 
   console.log("resilience tests\n");
 
-  // Write a config with one broken server and one working server
+  // Write a config with one broken server, one that fails its first start and one working server
   const configPath = resolve(projectRoot, "mcp-hub.test-resilience.json");
+  const markerPath = resolve(projectRoot, "mcp-hub.test-resilience.marker");
+  await unlink(markerPath).catch(() => {});
   await writeFile(configPath, JSON.stringify({
     servers: {
       broken: {
         command: "node",
         args: ["-e", "process.exit(1)"],
+      },
+      // Dies on its first start, then serves: the hub must retry it, alone.
+      flaky: {
+        command: "sh",
+        args: ["-c", `test -f "${markerPath}" && exec node examples/weather/dist/index.js; : > "${markerPath}"; exit 1`],
       },
       weather: {
         command: "node",
@@ -56,6 +63,13 @@ async function run() {
       assert.ok(tools.some((t: { name: string }) => t.name === "weather__get_forecast"));
     });
 
+    await test("a server that failed its first start is retried", async () => {
+      const result = await client.callTool({ name: "list_tools", arguments: { prefix: "flaky" } });
+      const content = result.content as TextContent[];
+      const tools = JSON.parse(content[0].text);
+      assert.ok(tools.some((t: { name: string }) => t.name === "flaky__get_forecast"));
+    });
+
     await test("broken server tools are absent (not crashing)", async () => {
       const result = await client.callTool({ name: "list_tools", arguments: { prefix: "broken" } });
       const content = result.content as TextContent[];
@@ -65,6 +79,7 @@ async function run() {
     await client.close();
   } finally {
     await unlink(configPath).catch(() => {});
+    await unlink(markerPath).catch(() => {});
   }
 
   finish();

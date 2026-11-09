@@ -48,6 +48,15 @@ interface Slot {
 
 const DRAIN_TIMEOUT_MS = 30_000;
 
+/**
+ * Start-up retries for a child whose first attempt failed. Children start
+ * together, and a stdio child that resolves its secrets while spawning can wait
+ * behind its siblings for the same serialized resolution, then miss its own
+ * start-up budget. Alone, nothing competes.
+ */
+const STARTUP_RETRY_ROUNDS = 2;
+const STARTUP_RETRY_DELAY_MS = 1_000;
+
 export interface HubOptions {
   /** Bounds on an OAuth child's connect / authorization step and on a call to it (test seam). */
   connectTimeoutMs?: number;
@@ -87,11 +96,33 @@ export class Hub {
     }
 
     // Install in config order, so collisions resolve the same way on every start.
-    const installs = await Promise.all(Array.from(this.slots.keys(), (name) => this.connect(name)));
-    for (const install of installs) install();
+    const names = Array.from(this.slots.keys());
+    for (const install of await Promise.all(names.map((name) => this.connect(name)))) install();
+    await this.retryStartupFailures(names);
 
     const connected = Array.from(this.slots.values()).filter((s) => s.status === "connected").length;
     log(`Ready — ${this.catalog.size} tools from ${connected} server(s)`);
+  }
+
+  /**
+   * Retry the children whose first start failed, one at a time: a failed child
+   * stays missing for the life of the process (there is no reconnect), so a
+   * start-up race must not be the last word.
+   */
+  private async retryStartupFailures(names: string[]): Promise<void> {
+    for (let round = 1; round <= STARTUP_RETRY_ROUNDS; round++) {
+      const failed = names.filter((name) => {
+        const slot = this.slots.get(name)!;
+        return slot.status === "failed" && !slot.broken;
+      });
+      if (failed.length === 0) return;
+      log(`${failed.length} server(s) failed to start, retrying one at a time (round ${round}/${STARTUP_RETRY_ROUNDS})`);
+      await new Promise<void>((done) => setTimeout(done, STARTUP_RETRY_DELAY_MS));
+      for (const name of failed) {
+        if (this.slots.get(name)!.status !== "failed") continue;
+        (await this.connect(name))();
+      }
+    }
   }
 
   /**
